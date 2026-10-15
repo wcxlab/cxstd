@@ -17,6 +17,8 @@ pub type WindowResizeDirection = winit::window::ResizeDirection;
 pub type WindowDisplayHandle<'a> = raw_window_handle::DisplayHandle<'a>;
 pub type WindowHandle<'a> = raw_window_handle::WindowHandle<'a>;
 pub type WindowHandleError = raw_window_handle::HandleError;
+pub type WindowHandleProvider =
+    std::sync::Arc<dyn raw_window_handle::HasWindowHandle + Send + Sync>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WindowError {
@@ -43,7 +45,7 @@ pub trait Window: Any + Send + Sync + fmt::Debug {
 
     fn reset_dead_keys(&self);
 
-    fn surface_position(&self) -> (i32, i32);
+    fn surface_position(&self) -> Result<(i32, i32), WindowError>;
 
     fn outer_position(&self) -> Result<(i32, i32), WindowError>;
 
@@ -55,8 +57,6 @@ pub trait Window: Any + Send + Sync + fmt::Debug {
     fn request_surface_size(&self, width: u32, height: u32) -> Option<(u32, u32)>;
 
     fn outer_size(&self) -> (u32, u32);
-
-    fn safe_area(&self) -> (u32, u32, u32, u32);
 
     fn set_min_surface_size(&self, min_size: Option<(u32, u32)>);
 

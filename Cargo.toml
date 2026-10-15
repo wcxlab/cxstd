@@ -1,7 +1,10 @@
 [package]
 name = "cxstd"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+description = "Shared window interfaces and types based on winit."
+license = "Apache-2.0"
+repository = "https://github.com/wcxlab/cxstd"
 
 [dependencies]
 anyhow = "1"
