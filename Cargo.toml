@@ -8,16 +8,23 @@ repository = "https://github.com/wcxlab/cxstd"
 
 [features]
 sdl = ["dep:sdl3-sys"]
+wgpu = ["dep:wgpu", "dep:pollster"]
 
 [dependencies]
 bitflags = "2"
 raw-window-handle = "0.6"
+pollster = { version = "1", optional = true }
 sdl3-sys = { version = "0.7.2", default-features = false, optional = true, features = ["build-from-source-static"] }
 thiserror = "2"
+wgpu = { version = "30", default-features = false, optional = true, features = ["std", "wgsl", "dx12", "metal", "vulkan"] }
 
 [[test]]
 name = "window_sdl"
 required-features = ["sdl"]
+
+[[test]]
+name = "window_sdl_wgpu"
+required-features = ["sdl", "wgpu"]
 
 [workspace]
 resolver = "3"

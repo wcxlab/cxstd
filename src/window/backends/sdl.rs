@@ -1,5 +1,18 @@
+//! `sdl_inst.create_wgpu_window(...)` pairs an owned SDL window with GPU presentation.
+//! Route events through `window.window_event(&event, &mut handler)`, then call
+//! `window.update(&mut handler)` and `window.render(&mut handler)` from the host loop.
+//! Frame access is limited to the render callback; frames and surfaces drop before the native window.
+
+#[cfg(feature = "wgpu")]
 use std::{
-    ffi::{CStr, CString, c_char},
+    cell::RefMut,
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+};
+
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    ffi::{CStr, CString, c_char, c_void},
     marker::PhantomData,
     mem::MaybeUninit,
     ptr::NonNull,
@@ -14,16 +27,26 @@ use super::super::*;
 
 static SDL_CONTEXTS: Mutex<Option<(ThreadId, usize)>> = Mutex::new(None);
 
-struct SdlContext;
+struct SdlContext {
+    cursors: RefCell<HashMap<WindowSystemCursor, NonNull<sys::mouse::SDL_Cursor>>>,
+}
+
+struct SdlWindowOwner {
+    raw: NonNull<sys::video::SDL_Window>,
+    context: Rc<SdlContext>,
+}
 
 pub struct SdlInstance {
     context: Rc<SdlContext>,
 }
 
-pub struct WindowInstance {
+pub struct SdlWindow {
     raw: NonNull<sys::video::SDL_Window>,
-    _context: Rc<SdlContext>,
+    hit_test: Box<Option<HitTestCallback>>,
+    owner: Rc<SdlWindowOwner>,
 }
+
+type HitTestCallback = Box<dyn Fn(i32, i32) -> WindowHitTestResult>;
 
 pub fn init() -> Result<SdlInstance, WindowError> {
     let mut contexts = SDL_CONTEXTS.lock().map_err(|_| WindowError::Unknown)?;
@@ -55,7 +78,9 @@ pub fn init() -> Result<SdlInstance, WindowError> {
     let (_, count) = contexts.get_or_insert((current_thread, 0));
     *count += 1;
     Ok(SdlInstance {
-        context: Rc::new(SdlContext),
+        context: Rc::new(SdlContext {
+            cursors: RefCell::new(HashMap::new()),
+        }),
     })
 }
 
@@ -75,14 +100,21 @@ impl SdlInstance {
         width: i32,
         height: i32,
         flags: WindowFlags,
-    ) -> Result<WindowInstance, WindowError> {
+    ) -> Result<SdlWindow, WindowError> {
+        if flags.intersects(WindowFlags::MODAL | WindowFlags::TOOLTIP | WindowFlags::POPUP_MENU) {
+            return Err(WindowError::Nul("child windows are not supported".into()));
+        }
         let title = CString::new(title).map_err(|error| WindowError::Nul(error.to_string()))?;
         let raw =
             unsafe { sys::video::SDL_CreateWindow(title.as_ptr(), width, height, flags.into()) };
         let raw = NonNull::new(raw).ok_or_else(Self::error)?;
-        Ok(WindowInstance {
+        Ok(SdlWindow {
             raw,
-            _context: Rc::clone(&self.context),
+            hit_test: Box::new(None),
+            owner: Rc::new(SdlWindowOwner {
+                raw,
+                context: Rc::clone(&self.context),
+            }),
         })
     }
 }
@@ -95,7 +127,670 @@ impl SdlInstance {
     }
 }
 
-impl Drop for WindowInstance {
+impl SdlWindow {
+    pub fn window_handle_provider(&self) -> Rc<dyn raw_window_handle::HasWindowHandle> {
+        self.owner.clone()
+    }
+}
+
+impl raw_window_handle::HasWindowHandle for SdlWindowOwner {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, WindowHandleError> {
+        let raw = self
+            .raw_window_handle()
+            .map_err(|_| WindowHandleError::Unavailable)?;
+        Ok(unsafe { WindowHandle::borrow_raw(raw) })
+    }
+}
+
+impl Window for SdlWindow {
+    fn get_id(&self) -> Result<WindowId, WindowError> {
+        let value = unsafe { sys::video::SDL_GetWindowID(self.raw.as_ptr()) };
+        if value.0 == 0 {
+            Err(SdlInstance::error())
+        } else {
+            Ok(value.into())
+        }
+    }
+
+    fn get_display(&self) -> Result<WindowDisplayId, WindowError> {
+        let value = unsafe { sys::video::SDL_GetDisplayForWindow(self.raw.as_ptr()) };
+        if value.0 == 0 {
+            Err(SdlInstance::error())
+        } else {
+            Ok(value.into())
+        }
+    }
+
+    fn get_pixel_density(&self) -> Result<f32, WindowError> {
+        let value = unsafe { sys::video::SDL_GetWindowPixelDensity(self.raw.as_ptr()) };
+        if value > 0.0 {
+            Ok(value)
+        } else {
+            Err(SdlInstance::error())
+        }
+    }
+
+    fn get_display_scale(&self) -> Result<f32, WindowError> {
+        let value = unsafe { sys::video::SDL_GetWindowDisplayScale(self.raw.as_ptr()) };
+        if value > 0.0 {
+            Ok(value)
+        } else {
+            Err(SdlInstance::error())
+        }
+    }
+
+    fn set_fullscreen_mode(&mut self, mode: Option<&WindowDisplayMode>) -> Result<(), WindowError> {
+        let Some(mode) = mode else {
+            return Self::result(unsafe {
+                sys::video::SDL_SetWindowFullscreenMode(self.raw.as_ptr(), std::ptr::null())
+            });
+        };
+        let mut count = 0;
+        let modes = unsafe {
+            sys::video::SDL_GetFullscreenDisplayModes(mode.display_id.into(), &mut count)
+        };
+        if modes.is_null() {
+            return Err(SdlInstance::error());
+        }
+        let mut matched = std::ptr::null();
+        for index in 0..count {
+            let candidate = unsafe { *modes.add(index as usize) };
+            if !candidate.is_null() && WindowDisplayMode::from(unsafe { &*candidate }) == *mode {
+                matched = candidate;
+                break;
+            }
+        }
+        unsafe { sys::stdinc::SDL_free(modes.cast()) };
+        if matched.is_null() {
+            return Err(WindowError::Nul(
+                "fullscreen mode is not available on the display".into(),
+            ));
+        }
+        Self::result(unsafe { sys::video::SDL_SetWindowFullscreenMode(self.raw.as_ptr(), matched) })
+    }
+
+    fn get_fullscreen_mode(&self) -> Option<WindowDisplayMode> {
+        let mode = unsafe { sys::video::SDL_GetWindowFullscreenMode(self.raw.as_ptr()) };
+        unsafe { mode.as_ref() }.map(WindowDisplayMode::from)
+    }
+
+    fn get_icc_profile(&self) -> Result<Vec<u8>, WindowError> {
+        let mut size = 0;
+        let profile = unsafe { sys::video::SDL_GetWindowICCProfile(self.raw.as_ptr(), &mut size) };
+        if profile.is_null() {
+            return Err(SdlInstance::error());
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(profile.cast::<u8>(), size) }.to_vec();
+        unsafe { sys::stdinc::SDL_free(profile) };
+        Ok(bytes)
+    }
+
+    fn get_pixel_format(&self) -> Result<WindowPixelFormat, WindowError> {
+        let format = unsafe { sys::video::SDL_GetWindowPixelFormat(self.raw.as_ptr()) };
+        if format == sys::pixels::SDL_PixelFormat::UNKNOWN {
+            Err(SdlInstance::error())
+        } else {
+            Ok(format.into())
+        }
+    }
+
+    fn get_properties(&self) -> Result<WindowPropertiesId, WindowError> {
+        let value = unsafe { sys::video::SDL_GetWindowProperties(self.raw.as_ptr()) };
+        if value.0 == 0 {
+            Err(SdlInstance::error())
+        } else {
+            Ok(value.into())
+        }
+    }
+
+    fn get_flags(&self) -> WindowFlags {
+        unsafe { sys::video::SDL_GetWindowFlags(self.raw.as_ptr()) }.into()
+    }
+
+    fn set_cursor(&mut self, cursor: WindowSystemCursor) -> Result<(), WindowError> {
+        let mut cursors = self.owner.context.cursors.borrow_mut();
+        let raw = match cursors.get(&cursor) {
+            Some(raw) => *raw,
+            None => {
+                let raw = unsafe { sys::mouse::SDL_CreateSystemCursor(cursor.into()) };
+                let raw = NonNull::new(raw).ok_or_else(SdlInstance::error)?;
+                cursors.insert(cursor, raw);
+                raw
+            }
+        };
+        if unsafe { sys::mouse::SDL_GetCursor() } == raw.as_ptr() {
+            return Ok(());
+        }
+        Self::result(unsafe { sys::mouse::SDL_SetCursor(raw.as_ptr()) })
+    }
+
+    fn start_text_input(&mut self) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::keyboard::SDL_StartTextInput(self.raw.as_ptr()) })
+    }
+
+    fn stop_text_input(&mut self) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::keyboard::SDL_StopTextInput(self.raw.as_ptr()) })
+    }
+
+    fn set_title(&mut self, title: &str) -> Result<(), WindowError> {
+        let title = CString::new(title).map_err(|error| WindowError::Nul(error.to_string()))?;
+        Self::result(unsafe { sys::video::SDL_SetWindowTitle(self.raw.as_ptr(), title.as_ptr()) })
+    }
+
+    fn get_title(&self) -> String {
+        unsafe { copy_string(sys::video::SDL_GetWindowTitle(self.raw.as_ptr())) }
+            .unwrap_or_default()
+    }
+
+    fn set_icon(&mut self, icon: &WindowSurfaceRef<'_>) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_SetWindowIcon(self.raw.as_ptr(), icon.into()) })
+    }
+
+    fn set_position(&mut self, x: i32, y: i32) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_SetWindowPosition(self.raw.as_ptr(), x, y) })
+    }
+
+    fn get_position(&self) -> Result<(i32, i32), WindowError> {
+        let (mut first, mut second) = (0, 0);
+        Self::result(unsafe {
+            sys::video::SDL_GetWindowPosition(self.raw.as_ptr(), &mut first, &mut second)
+        })?;
+        Ok((first, second))
+    }
+
+    fn set_size(&mut self, width: i32, height: i32) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_SetWindowSize(self.raw.as_ptr(), width, height) })
+    }
+
+    fn get_size(&self) -> Result<(i32, i32), WindowError> {
+        let (mut first, mut second) = (0, 0);
+        Self::result(unsafe {
+            sys::video::SDL_GetWindowSize(self.raw.as_ptr(), &mut first, &mut second)
+        })?;
+        Ok((first, second))
+    }
+
+    fn get_safe_area(&self) -> Result<WindowRect, WindowError> {
+        let mut rect = sys::rect::SDL_Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        };
+        Self::result(unsafe { sys::video::SDL_GetWindowSafeArea(self.raw.as_ptr(), &mut rect) })?;
+        Ok(rect.into())
+    }
+
+    fn set_aspect_ratio(&mut self, min_aspect: f32, max_aspect: f32) -> Result<(), WindowError> {
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowAspectRatio(self.raw.as_ptr(), min_aspect, max_aspect)
+        })
+    }
+
+    fn get_aspect_ratio(&self) -> Result<(f32, f32), WindowError> {
+        let (mut first, mut second) = (0.0, 0.0);
+        Self::result(unsafe {
+            sys::video::SDL_GetWindowAspectRatio(self.raw.as_ptr(), &mut first, &mut second)
+        })?;
+        Ok((first, second))
+    }
+
+    fn get_borders_size(&self) -> Result<(i32, i32, i32, i32), WindowError> {
+        let (mut top, mut left, mut bottom, mut right) = (0, 0, 0, 0);
+        Self::result(unsafe {
+            sys::video::SDL_GetWindowBordersSize(
+                self.raw.as_ptr(),
+                &mut top,
+                &mut left,
+                &mut bottom,
+                &mut right,
+            )
+        })?;
+        Ok((top, left, bottom, right))
+    }
+
+    fn get_size_in_pixels(&self) -> Result<(i32, i32), WindowError> {
+        let (mut first, mut second) = (0, 0);
+        Self::result(unsafe {
+            sys::video::SDL_GetWindowSizeInPixels(self.raw.as_ptr(), &mut first, &mut second)
+        })?;
+        Ok((first, second))
+    }
+
+    fn set_minimum_size(&mut self, width: i32, height: i32) -> Result<(), WindowError> {
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowMinimumSize(self.raw.as_ptr(), width, height)
+        })
+    }
+
+    fn get_minimum_size(&self) -> Result<(i32, i32), WindowError> {
+        let (mut first, mut second) = (0, 0);
+        Self::result(unsafe {
+            sys::video::SDL_GetWindowMinimumSize(self.raw.as_ptr(), &mut first, &mut second)
+        })?;
+        Ok((first, second))
+    }
+
+    fn set_maximum_size(&mut self, width: i32, height: i32) -> Result<(), WindowError> {
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowMaximumSize(self.raw.as_ptr(), width, height)
+        })
+    }
+
+    fn get_maximum_size(&self) -> Result<(i32, i32), WindowError> {
+        let (mut first, mut second) = (0, 0);
+        Self::result(unsafe {
+            sys::video::SDL_GetWindowMaximumSize(self.raw.as_ptr(), &mut first, &mut second)
+        })?;
+        Ok((first, second))
+    }
+
+    fn set_bordered(&mut self, bordered: bool) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_SetWindowBordered(self.raw.as_ptr(), bordered) })
+    }
+
+    fn set_resizable(&mut self, resizable: bool) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_SetWindowResizable(self.raw.as_ptr(), resizable) })
+    }
+
+    fn set_always_on_top(&mut self, on_top: bool) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_SetWindowAlwaysOnTop(self.raw.as_ptr(), on_top) })
+    }
+
+    fn set_fill_document(&mut self, fill: bool) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_SetWindowFillDocument(self.raw.as_ptr(), fill) })
+    }
+
+    fn show(&mut self) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_ShowWindow(self.raw.as_ptr()) })
+    }
+
+    fn hide(&mut self) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_HideWindow(self.raw.as_ptr()) })
+    }
+
+    fn raise(&mut self) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_RaiseWindow(self.raw.as_ptr()) })
+    }
+
+    fn maximize(&mut self) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_MaximizeWindow(self.raw.as_ptr()) })
+    }
+
+    fn minimize(&mut self) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_MinimizeWindow(self.raw.as_ptr()) })
+    }
+
+    fn restore(&mut self) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_RestoreWindow(self.raw.as_ptr()) })
+    }
+
+    fn set_fullscreen(&mut self, fullscreen: bool) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_SetWindowFullscreen(self.raw.as_ptr(), fullscreen) })
+    }
+
+    fn sync(&self) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_SyncWindow(self.raw.as_ptr()) })
+    }
+
+    fn has_surface(&self) -> bool {
+        unsafe { sys::video::SDL_WindowHasSurface(self.raw.as_ptr()) }
+    }
+
+    fn get_surface(&mut self) -> Result<WindowSurfaceRef<'_>, WindowError> {
+        let surface = unsafe { sys::video::SDL_GetWindowSurface(self.raw.as_ptr()) };
+        Ok(WindowSurfaceRef {
+            raw: NonNull::new(surface).ok_or_else(SdlInstance::error)?.cast(),
+            marker: PhantomData,
+        })
+    }
+
+    fn set_surface_vsync(&mut self, vsync: i32) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_SetWindowSurfaceVSync(self.raw.as_ptr(), vsync) })
+    }
+
+    fn get_surface_vsync(&self) -> Result<i32, WindowError> {
+        let mut vsync = 0;
+        Self::result(unsafe {
+            sys::video::SDL_GetWindowSurfaceVSync(self.raw.as_ptr(), &mut vsync)
+        })?;
+        Ok(vsync)
+    }
+
+    fn update_surface(&mut self) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_UpdateWindowSurface(self.raw.as_ptr()) })
+    }
+
+    fn update_surface_rects(&mut self, rects: &[WindowRect]) -> Result<(), WindowError> {
+        let count =
+            i32::try_from(rects.len()).map_err(|error| WindowError::Nul(error.to_string()))?;
+        let rects: Vec<sys::rect::SDL_Rect> = rects.iter().copied().map(Into::into).collect();
+        Self::result(unsafe {
+            sys::video::SDL_UpdateWindowSurfaceRects(self.raw.as_ptr(), rects.as_ptr(), count)
+        })
+    }
+
+    fn destroy_surface(&mut self) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_DestroyWindowSurface(self.raw.as_ptr()) })
+    }
+
+    fn set_keyboard_grab(&mut self, grabbed: bool) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_SetWindowKeyboardGrab(self.raw.as_ptr(), grabbed) })
+    }
+
+    fn set_mouse_grab(&mut self, grabbed: bool) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_SetWindowMouseGrab(self.raw.as_ptr(), grabbed) })
+    }
+
+    fn get_keyboard_grab(&self) -> bool {
+        unsafe { sys::video::SDL_GetWindowKeyboardGrab(self.raw.as_ptr()) }
+    }
+
+    fn get_mouse_grab(&self) -> bool {
+        unsafe { sys::video::SDL_GetWindowMouseGrab(self.raw.as_ptr()) }
+    }
+
+    fn set_mouse_rect(&mut self, rect: Option<&WindowRect>) -> Result<(), WindowError> {
+        let rect = rect.copied().map(sys::rect::SDL_Rect::from);
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowMouseRect(
+                self.raw.as_ptr(),
+                rect.as_ref().map_or(std::ptr::null(), |rect| rect),
+            )
+        })
+    }
+
+    fn get_mouse_rect(&self) -> Option<WindowRect> {
+        let rect = unsafe { sys::video::SDL_GetWindowMouseRect(self.raw.as_ptr()) };
+        unsafe { rect.as_ref() }.copied().map(Into::into)
+    }
+
+    fn set_opacity(&mut self, opacity: f32) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_SetWindowOpacity(self.raw.as_ptr(), opacity) })
+    }
+
+    fn get_opacity(&self) -> Result<f32, WindowError> {
+        let value = unsafe { sys::video::SDL_GetWindowOpacity(self.raw.as_ptr()) };
+        if value < 0.0 {
+            Err(SdlInstance::error())
+        } else {
+            Ok(value)
+        }
+    }
+
+    fn set_focusable(&mut self, focusable: bool) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_SetWindowFocusable(self.raw.as_ptr(), focusable) })
+    }
+
+    fn show_system_menu(&mut self, x: i32, y: i32) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_ShowWindowSystemMenu(self.raw.as_ptr(), x, y) })
+    }
+
+    fn set_hit_test(
+        &mut self,
+        hit_test: impl Fn(i32, i32) -> WindowHitTestResult + 'static,
+    ) -> Result<(), WindowError>
+    where
+        Self: Sized,
+    {
+        let previous = self.hit_test.replace(Box::new(hit_test));
+        let data = (&mut *self.hit_test as *mut Option<HitTestCallback>).cast();
+        let result = Self::result(unsafe {
+            sys::video::SDL_SetWindowHitTest(self.raw.as_ptr(), Some(Self::hit_test_callback), data)
+        });
+        drop(previous);
+        result
+    }
+
+    fn set_shape(&mut self, shape: Option<&WindowSurfaceRef<'_>>) -> Result<(), WindowError> {
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowShape(
+                self.raw.as_ptr(),
+                shape.map_or(std::ptr::null_mut(), Into::into),
+            )
+        })
+    }
+
+    fn flash(&mut self, operation: WindowFlashOperation) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_FlashWindow(self.raw.as_ptr(), operation.into()) })
+    }
+
+    fn set_progress_state(&mut self, state: WindowProgressState) -> Result<(), WindowError> {
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowProgressState(self.raw.as_ptr(), state.into())
+        })
+    }
+
+    fn get_progress_state(&self) -> Result<WindowProgressState, WindowError> {
+        let state = unsafe { sys::video::SDL_GetWindowProgressState(self.raw.as_ptr()) };
+        if state == sys::video::SDL_ProgressState::INVALID {
+            Err(SdlInstance::error())
+        } else {
+            Ok(state.into())
+        }
+    }
+
+    fn set_progress_value(&mut self, value: f32) -> Result<(), WindowError> {
+        Self::result(unsafe { sys::video::SDL_SetWindowProgressValue(self.raw.as_ptr(), value) })
+    }
+
+    fn get_progress_value(&self) -> Result<f32, WindowError> {
+        let value = unsafe { sys::video::SDL_GetWindowProgressValue(self.raw.as_ptr()) };
+        if value < 0.0 {
+            Err(SdlInstance::error())
+        } else {
+            Ok(value)
+        }
+    }
+
+    fn display_handle(&self) -> Result<WindowDisplayHandle<'_>, WindowError> {
+        let raw = self.owner.raw_display_handle()?;
+        Ok(unsafe { WindowDisplayHandle::borrow_raw(raw) })
+    }
+
+    fn window_handle(&self) -> Result<WindowHandle<'_>, WindowError> {
+        let raw = self.owner.raw_window_handle()?;
+        Ok(unsafe { WindowHandle::borrow_raw(raw) })
+    }
+}
+
+impl SdlWindowOwner {
+    fn raw_display_handle(&self) -> Result<raw_window_handle::RawDisplayHandle, WindowError> {
+        use raw_window_handle as rwh;
+
+        let driver = unsafe { copy_string(sys::video::SDL_GetCurrentVideoDriver()) }
+            .ok_or_else(SdlInstance::error)?;
+        match driver.as_str() {
+            "windows" => Ok(rwh::RawDisplayHandle::Windows(
+                rwh::WindowsDisplayHandle::new(),
+            )),
+            "cocoa" => Ok(rwh::RawDisplayHandle::AppKit(
+                rwh::AppKitDisplayHandle::new(),
+            )),
+            "uikit" => Ok(rwh::RawDisplayHandle::UiKit(rwh::UiKitDisplayHandle::new())),
+            "android" => Ok(rwh::RawDisplayHandle::Android(
+                rwh::AndroidDisplayHandle::new(),
+            )),
+            "wayland" => {
+                let display =
+                    self.native_pointer(sys::video::SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER)?;
+                Ok(rwh::RawDisplayHandle::Wayland(
+                    rwh::WaylandDisplayHandle::new(display),
+                ))
+            }
+            "x11" => {
+                let display =
+                    self.native_pointer(sys::video::SDL_PROP_WINDOW_X11_DISPLAY_POINTER)?;
+                let screen = unsafe {
+                    sys::properties::SDL_GetNumberProperty(
+                        self.get_properties()?.into(),
+                        sys::video::SDL_PROP_WINDOW_X11_SCREEN_NUMBER,
+                        0,
+                    )
+                };
+                Ok(rwh::RawDisplayHandle::Xlib(rwh::XlibDisplayHandle::new(
+                    Some(display),
+                    screen as i32,
+                )))
+            }
+            _ => Err(WindowError::Nul(format!(
+                "native display handles are not supported by SDL video driver {driver}"
+            ))),
+        }
+    }
+
+    fn raw_window_handle(&self) -> Result<raw_window_handle::RawWindowHandle, WindowError> {
+        use raw_window_handle as rwh;
+
+        let driver = unsafe { copy_string(sys::video::SDL_GetCurrentVideoDriver()) }
+            .ok_or_else(SdlInstance::error)?;
+        match driver.as_str() {
+            "windows" => {
+                let hwnd = self.native_pointer(sys::video::SDL_PROP_WINDOW_WIN32_HWND_POINTER)?;
+                let mut handle = rwh::Win32WindowHandle::new(
+                    std::num::NonZeroIsize::new(hwnd.as_ptr() as isize)
+                        .ok_or(WindowError::Unknown)?,
+                );
+                let instance = unsafe {
+                    sys::properties::SDL_GetPointerProperty(
+                        self.get_properties()?.into(),
+                        sys::video::SDL_PROP_WINDOW_WIN32_INSTANCE_POINTER,
+                        std::ptr::null_mut(),
+                    )
+                };
+                handle.hinstance = std::num::NonZeroIsize::new(instance as isize);
+                Ok(rwh::RawWindowHandle::Win32(handle))
+            }
+            "wayland" => {
+                let surface =
+                    self.native_pointer(sys::video::SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER)?;
+                Ok(rwh::RawWindowHandle::Wayland(
+                    rwh::WaylandWindowHandle::new(surface),
+                ))
+            }
+            "x11" => {
+                let window = unsafe {
+                    sys::properties::SDL_GetNumberProperty(
+                        self.get_properties()?.into(),
+                        sys::video::SDL_PROP_WINDOW_X11_WINDOW_NUMBER,
+                        0,
+                    )
+                };
+                if window == 0 {
+                    return Err(WindowError::Nul("X11 window handle is unavailable".into()));
+                }
+                Ok(rwh::RawWindowHandle::Xlib(rwh::XlibWindowHandle::new(
+                    window as _,
+                )))
+            }
+            "android" => {
+                let window =
+                    self.native_pointer(sys::video::SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER)?;
+                Ok(rwh::RawWindowHandle::AndroidNdk(
+                    rwh::AndroidNdkWindowHandle::new(window),
+                ))
+            }
+            #[cfg(target_os = "macos")]
+            "cocoa" => {
+                let window =
+                    self.native_pointer(sys::video::SDL_PROP_WINDOW_COCOA_WINDOW_POINTER)?;
+                let view = unsafe { Self::objc_view(window, c"contentView") }?;
+                Ok(rwh::RawWindowHandle::AppKit(rwh::AppKitWindowHandle::new(
+                    view,
+                )))
+            }
+            #[cfg(target_os = "ios")]
+            "uikit" => {
+                let window =
+                    self.native_pointer(sys::video::SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER)?;
+                let controller = unsafe { Self::objc_view(window, c"rootViewController") }?;
+                let view = unsafe { Self::objc_view(controller, c"view") }?;
+                let mut handle = rwh::UiKitWindowHandle::new(view);
+                handle.ui_view_controller = Some(controller);
+                Ok(rwh::RawWindowHandle::UiKit(handle))
+            }
+            _ => Err(WindowError::Nul(format!(
+                "native window handles are not supported by SDL video driver {driver}"
+            ))),
+        }
+    }
+
+    fn native_pointer(&self, name: *const c_char) -> Result<NonNull<c_void>, WindowError> {
+        let pointer = unsafe {
+            sys::properties::SDL_GetPointerProperty(
+                self.get_properties()?.into(),
+                name,
+                std::ptr::null_mut(),
+            )
+        };
+        NonNull::new(pointer)
+            .ok_or_else(|| WindowError::Nul("native window property is unavailable".into()))
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    unsafe fn objc_view(
+        object: NonNull<c_void>,
+        selector: &CStr,
+    ) -> Result<NonNull<c_void>, WindowError> {
+        #[link(name = "objc")]
+        unsafe extern "C" {
+            fn sel_registerName(name: *const c_char) -> *mut c_void;
+            fn objc_msgSend(object: *mut c_void, selector: *mut c_void) -> *mut c_void;
+        }
+        let pointer = unsafe { objc_msgSend(object.as_ptr(), sel_registerName(selector.as_ptr())) };
+        NonNull::new(pointer)
+            .ok_or_else(|| WindowError::Nul("native window view is unavailable".into()))
+    }
+
+    fn get_properties(&self) -> Result<WindowPropertiesId, WindowError> {
+        let value = unsafe { sys::video::SDL_GetWindowProperties(self.raw.as_ptr()) };
+        if value.0 == 0 {
+            Err(SdlInstance::error())
+        } else {
+            Ok(value.into())
+        }
+    }
+}
+
+impl SdlWindow {
+    fn result(success: bool) -> Result<(), WindowError> {
+        if success {
+            Ok(())
+        } else {
+            Err(SdlInstance::error())
+        }
+    }
+
+    unsafe extern "C" fn hit_test_callback(
+        _window: *mut sys::video::SDL_Window,
+        point: *const sys::rect::SDL_Point,
+        data: *mut c_void,
+    ) -> sys::video::SDL_HitTestResult {
+        let callback = unsafe { &*data.cast::<Option<HitTestCallback>>() };
+        let point = unsafe { *point };
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            callback
+                .as_ref()
+                .map_or(WindowHitTestResult::Normal, |callback| {
+                    callback(point.x, point.y)
+                })
+        }))
+        .unwrap_or(WindowHitTestResult::Normal)
+        .into()
+    }
+}
+
+impl Drop for SdlWindow {
+    fn drop(&mut self) {
+        if self.hit_test.is_some() {
+            unsafe {
+                sys::video::SDL_SetWindowHitTest(self.raw.as_ptr(), None, std::ptr::null_mut())
+            };
+        }
+    }
+}
+
+impl Drop for SdlWindowOwner {
     fn drop(&mut self) {
         unsafe { sys::video::SDL_DestroyWindow(self.raw.as_ptr()) };
     }
@@ -103,6 +798,9 @@ impl Drop for WindowInstance {
 
 impl Drop for SdlContext {
     fn drop(&mut self) {
+        for (_, cursor) in self.cursors.get_mut().drain() {
+            unsafe { sys::mouse::SDL_DestroyCursor(cursor.as_ptr()) };
+        }
         let mut contexts = SDL_CONTEXTS
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -208,15 +906,6 @@ impl From<&WindowSurfaceRef<'_>> for *mut sys::surface::SDL_Surface {
     }
 }
 
-impl From<sys::rect::SDL_Point> for WindowPoint {
-    fn from(value: sys::rect::SDL_Point) -> Self {
-        Self {
-            x: value.x,
-            y: value.y,
-        }
-    }
-}
-
 impl From<sys::rect::SDL_Rect> for WindowRect {
     fn from(value: sys::rect::SDL_Rect) -> Self {
         Self {
@@ -224,15 +913,6 @@ impl From<sys::rect::SDL_Rect> for WindowRect {
             y: value.y,
             width: value.w,
             height: value.h,
-        }
-    }
-}
-
-impl From<WindowPoint> for sys::rect::SDL_Point {
-    fn from(value: WindowPoint) -> Self {
-        Self {
-            x: value.x,
-            y: value.y,
         }
     }
 }
@@ -1446,4 +2126,688 @@ unsafe fn copy_strings(values: *const *const c_char, count: i32) -> Vec<String> 
         .iter()
         .map(|value| unsafe { copy_string(*value) }.unwrap_or_default())
         .collect()
+}
+
+#[cfg(feature = "wgpu")]
+pub struct SdlWgpuWindow {
+    frame: RefCell<Option<FrameResources>>,
+    gpu: WgpuContext,
+    native: SdlWindow,
+}
+
+#[cfg(feature = "wgpu")]
+pub struct SdlWgpuFrame<'a> {
+    resources: RefMut<'a, FrameResources>,
+}
+
+#[cfg(feature = "wgpu")]
+struct FrameResources {
+    texture_view: wgpu::TextureView,
+    command_encoder: wgpu::CommandEncoder,
+    surface_texture: wgpu::SurfaceTexture,
+}
+
+#[cfg(feature = "wgpu")]
+struct WgpuContext {
+    surface: wgpu::Surface<'static>,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface_config: wgpu::SurfaceConfiguration,
+    clear_color: wgpu::Color,
+    suspended: bool,
+    instance: wgpu::Instance,
+}
+
+#[cfg(feature = "wgpu")]
+impl SdlInstance {
+    pub fn create_wgpu_window(
+        &self,
+        title: &str,
+        width: i32,
+        height: i32,
+        flags: WindowFlags,
+    ) -> Result<SdlWgpuWindow, WindowError> {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        let flags = flags | WindowFlags::METAL;
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "ios")))]
+        let flags = flags | WindowFlags::VULKAN;
+        let window = self.create_window(title, width, height, flags)?;
+        SdlWgpuWindow::new(window)
+    }
+}
+
+#[cfg(feature = "wgpu")]
+impl SdlWgpuWindow {
+    pub fn window_handle_provider(&self) -> Rc<dyn raw_window_handle::HasWindowHandle> {
+        self.native.window_handle_provider()
+    }
+
+    pub fn init(&mut self, handler: &mut impl WindowHandler<Self>) -> Result<(), WindowError> {
+        let result = handler.init(self);
+        result.or_else(|error| handler.error(error))
+    }
+
+    pub fn update(&mut self, handler: &mut impl WindowHandler<Self>) -> Result<(), WindowError> {
+        let result = handler.update(self);
+        result.or_else(|error| handler.error(error))
+    }
+
+    pub fn window_event(
+        &mut self,
+        event: &WindowEvent,
+        handler: &mut impl WindowHandler<Self>,
+    ) -> Result<(), WindowError> {
+        let result = (|| {
+            if let WindowEvent::WindowPixelSizeChanged {
+                window_id,
+                width,
+                height,
+                ..
+            } = event
+            {
+                if *window_id != self.get_id()? {
+                    return Ok(());
+                }
+                let width =
+                    u32::try_from(*width).map_err(|error| WindowError::Nul(error.to_string()))?;
+                let height =
+                    u32::try_from(*height).map_err(|error| WindowError::Nul(error.to_string()))?;
+                self.resize_surface(width, height)?;
+            }
+            handler.window_event(self, event)
+        })();
+        result.or_else(|error| handler.error(error))
+    }
+
+    pub fn render(&mut self, handler: &mut impl WindowHandler<Self>) -> Result<bool, WindowError> {
+        if self.gpu.suspended {
+            return Ok(false);
+        }
+        if self
+            .frame
+            .try_borrow()
+            .map_err(|error| WindowError::Nul(error.to_string()))?
+            .is_some()
+        {
+            return Err(WindowError::Nul("a wgpu frame is already active".into()));
+        }
+        let frame = match self.acquire_frame() {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return Ok(false),
+            Err(error) => {
+                handler.error(error)?;
+                return Ok(false);
+            }
+        };
+        *self.frame.borrow_mut() = Some(frame);
+        let result = catch_unwind(AssertUnwindSafe(|| handler.render(self)));
+        let frame = self
+            .frame
+            .try_borrow_mut()
+            .map_err(|error| WindowError::Nul(error.to_string()))
+            .map(|mut slot| slot.take());
+        let result = match result {
+            Ok(result) => result,
+            Err(payload) => {
+                drop(frame);
+                resume_unwind(payload);
+            }
+        };
+        let frame = frame?.ok_or_else(|| {
+            WindowError::Nul("the render callback replaced the active window".into())
+        })?;
+        if let Err(error) = result {
+            drop(frame);
+            handler.error(error)?;
+            return Ok(false);
+        }
+        self.gpu.queue.submit([frame.command_encoder.finish()]);
+        self.gpu.queue.present(frame.surface_texture);
+        let result = handler.frame_ready(self);
+        result.or_else(|error| handler.error(error))?;
+        Ok(true)
+    }
+}
+
+#[cfg(feature = "wgpu")]
+impl SdlWgpuWindow {
+    fn new(native: SdlWindow) -> Result<Self, WindowError> {
+        if native.has_surface() || native.get_flags().is_opengl() {
+            return Err(WindowError::Nul(
+                "wgpu windows cannot use an SDL software surface or OpenGL context".into(),
+            ));
+        }
+        let (width, height) = native.get_size_in_pixels()?;
+        let width = u32::try_from(width).map_err(|error| WindowError::Nul(error.to_string()))?;
+        let height = u32::try_from(height).map_err(|error| WindowError::Nul(error.to_string()))?;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: if cfg!(target_os = "windows") {
+                wgpu::Backends::DX12
+            } else {
+                wgpu::Backends::METAL | wgpu::Backends::VULKAN
+            },
+            flags: wgpu::InstanceFlags::empty().with_env(),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let raw_display_handle = native.display_handle()?.as_raw();
+        let raw_window_handle = native.window_handle()?.as_raw();
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: Some(raw_display_handle),
+                raw_window_handle,
+            })
+        }
+        .map_err(|error| WindowError::Nul(format!("failed to create wgpu surface: {error}")))?;
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .map_err(|error| WindowError::Nul(format!("failed to request wgpu adapter: {error}")))?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("cxstd window device"),
+            ..Default::default()
+        }))
+        .map_err(|error| WindowError::Nul(format!("failed to request wgpu device: {error}")))?;
+        let mut surface_config = surface
+            .get_default_config(&adapter, width.max(1), height.max(1))
+            .ok_or_else(|| {
+                WindowError::Nul("wgpu adapter is incompatible with the surface".into())
+            })?;
+        surface_config.format = surface
+            .get_capabilities(&adapter)
+            .formats
+            .into_iter()
+            .find(|format| {
+                matches!(
+                    format,
+                    wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
+                )
+            })
+            .ok_or_else(|| {
+                WindowError::Nul("wgpu surface does not support an UNORM format".into())
+            })?;
+        if width > device.limits().max_texture_dimension_2d
+            || height > device.limits().max_texture_dimension_2d
+        {
+            return Err(WindowError::Nul(
+                "window size exceeds the wgpu device limits".into(),
+            ));
+        }
+        let suspended = width == 0 || height == 0;
+        if !suspended {
+            surface.configure(&device, &surface_config);
+        }
+        Ok(Self {
+            frame: RefCell::new(None),
+            gpu: WgpuContext {
+                surface,
+                adapter,
+                device,
+                queue,
+                surface_config,
+                clear_color: wgpu::Color {
+                    r: 17.0 / 255.0,
+                    g: 24.0 / 255.0,
+                    b: 39.0 / 255.0,
+                    a: 1.0,
+                },
+                suspended,
+                instance,
+            },
+            native,
+        })
+    }
+
+    fn acquire_frame(&self) -> Result<Option<FrameResources>, WindowError> {
+        let surface_texture = match self.gpu.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return Ok(None);
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.gpu
+                    .surface
+                    .configure(&self.gpu.device, &self.gpu.surface_config);
+                return Ok(None);
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                return Err(WindowError::Nul("wgpu surface lost".into()));
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return Err(WindowError::Nul("wgpu surface validation failed".into()));
+            }
+        };
+        let texture_view = surface_texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut clear = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("cxstd window clear encoder"),
+            });
+        {
+            let _pass = clear.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cxstd window clear pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &texture_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(self.gpu.clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+        }
+        self.gpu.queue.submit([clear.finish()]);
+        let command_encoder =
+            self.gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("cxstd window frame encoder"),
+                });
+        Ok(Some(FrameResources {
+            texture_view,
+            command_encoder,
+            surface_texture,
+        }))
+    }
+
+    fn software_surface_error() -> WindowError {
+        WindowError::Nul("SDL software surfaces are not available on a wgpu window".into())
+    }
+}
+
+#[cfg(feature = "wgpu")]
+impl WgpuFrame for SdlWgpuFrame<'_> {
+    fn texture_view(&self) -> &wgpu::TextureView {
+        &self.resources.texture_view
+    }
+
+    fn command_encoder(&mut self) -> &mut wgpu::CommandEncoder {
+        &mut self.resources.command_encoder
+    }
+}
+
+#[cfg(feature = "wgpu")]
+impl WgpuWindow for SdlWgpuWindow {
+    type Frame<'a> = SdlWgpuFrame<'a>;
+
+    fn instance(&self) -> &wgpu::Instance {
+        &self.gpu.instance
+    }
+
+    fn adapter(&self) -> &wgpu::Adapter {
+        &self.gpu.adapter
+    }
+
+    fn device(&self) -> &wgpu::Device {
+        &self.gpu.device
+    }
+
+    fn queue(&self) -> &wgpu::Queue {
+        &self.gpu.queue
+    }
+
+    fn surface_config(&self) -> &wgpu::SurfaceConfiguration {
+        &self.gpu.surface_config
+    }
+
+    fn clear_color(&self) -> wgpu::Color {
+        self.gpu.clear_color
+    }
+
+    fn set_clear_color(&mut self, color: wgpu::Color) {
+        self.gpu.clear_color = color;
+    }
+
+    fn resize_surface(&mut self, width: u32, height: u32) -> Result<(), WindowError> {
+        if self
+            .frame
+            .try_borrow()
+            .map_err(|error| WindowError::Nul(error.to_string()))?
+            .is_some()
+        {
+            return Err(WindowError::Nul(
+                "cannot resize the surface while a frame is active".into(),
+            ));
+        }
+        if width == 0 || height == 0 {
+            self.gpu.suspended = true;
+            return Ok(());
+        }
+        let limit = self.gpu.device.limits().max_texture_dimension_2d;
+        if width > limit || height > limit {
+            return Err(WindowError::Nul(
+                "window size exceeds the wgpu device limits".into(),
+            ));
+        }
+        self.gpu.surface_config.width = width;
+        self.gpu.surface_config.height = height;
+        self.gpu
+            .surface
+            .configure(&self.gpu.device, &self.gpu.surface_config);
+        self.gpu.suspended = false;
+        Ok(())
+    }
+
+    fn next_frame(&self) -> Result<Self::Frame<'_>, WindowError> {
+        let slot = self
+            .frame
+            .try_borrow_mut()
+            .map_err(|error| WindowError::Nul(error.to_string()))?;
+        let resources = RefMut::filter_map(slot, |slot| slot.as_mut())
+            .map_err(|_| WindowError::Nul("a frame is only available during render".into()))?;
+        Ok(SdlWgpuFrame { resources })
+    }
+}
+
+#[cfg(feature = "wgpu")]
+impl Window for SdlWgpuWindow {
+    fn get_id(&self) -> Result<WindowId, WindowError> {
+        self.native.get_id()
+    }
+
+    fn get_display(&self) -> Result<WindowDisplayId, WindowError> {
+        self.native.get_display()
+    }
+
+    fn get_pixel_density(&self) -> Result<f32, WindowError> {
+        self.native.get_pixel_density()
+    }
+
+    fn get_display_scale(&self) -> Result<f32, WindowError> {
+        self.native.get_display_scale()
+    }
+
+    fn set_fullscreen_mode(&mut self, mode: Option<&WindowDisplayMode>) -> Result<(), WindowError> {
+        self.native.set_fullscreen_mode(mode)
+    }
+
+    fn get_fullscreen_mode(&self) -> Option<WindowDisplayMode> {
+        self.native.get_fullscreen_mode()
+    }
+
+    fn get_icc_profile(&self) -> Result<Vec<u8>, WindowError> {
+        self.native.get_icc_profile()
+    }
+
+    fn get_pixel_format(&self) -> Result<WindowPixelFormat, WindowError> {
+        self.native.get_pixel_format()
+    }
+
+    fn get_properties(&self) -> Result<WindowPropertiesId, WindowError> {
+        self.native.get_properties()
+    }
+
+    fn get_flags(&self) -> WindowFlags {
+        self.native.get_flags()
+    }
+
+    fn set_cursor(&mut self, cursor: WindowSystemCursor) -> Result<(), WindowError> {
+        self.native.set_cursor(cursor)
+    }
+
+    fn start_text_input(&mut self) -> Result<(), WindowError> {
+        self.native.start_text_input()
+    }
+
+    fn stop_text_input(&mut self) -> Result<(), WindowError> {
+        self.native.stop_text_input()
+    }
+
+    fn set_title(&mut self, title: &str) -> Result<(), WindowError> {
+        self.native.set_title(title)
+    }
+
+    fn get_title(&self) -> String {
+        self.native.get_title()
+    }
+
+    fn set_icon(&mut self, icon: &WindowSurfaceRef<'_>) -> Result<(), WindowError> {
+        self.native.set_icon(icon)
+    }
+
+    fn set_position(&mut self, x: i32, y: i32) -> Result<(), WindowError> {
+        self.native.set_position(x, y)
+    }
+
+    fn get_position(&self) -> Result<(i32, i32), WindowError> {
+        self.native.get_position()
+    }
+
+    fn set_size(&mut self, width: i32, height: i32) -> Result<(), WindowError> {
+        self.native.set_size(width, height)
+    }
+
+    fn get_size(&self) -> Result<(i32, i32), WindowError> {
+        self.native.get_size()
+    }
+
+    fn get_safe_area(&self) -> Result<WindowRect, WindowError> {
+        self.native.get_safe_area()
+    }
+
+    fn set_aspect_ratio(&mut self, min_aspect: f32, max_aspect: f32) -> Result<(), WindowError> {
+        self.native.set_aspect_ratio(min_aspect, max_aspect)
+    }
+
+    fn get_aspect_ratio(&self) -> Result<(f32, f32), WindowError> {
+        self.native.get_aspect_ratio()
+    }
+
+    fn get_borders_size(&self) -> Result<(i32, i32, i32, i32), WindowError> {
+        self.native.get_borders_size()
+    }
+
+    fn get_size_in_pixels(&self) -> Result<(i32, i32), WindowError> {
+        self.native.get_size_in_pixels()
+    }
+
+    fn set_minimum_size(&mut self, width: i32, height: i32) -> Result<(), WindowError> {
+        self.native.set_minimum_size(width, height)
+    }
+
+    fn get_minimum_size(&self) -> Result<(i32, i32), WindowError> {
+        self.native.get_minimum_size()
+    }
+
+    fn set_maximum_size(&mut self, width: i32, height: i32) -> Result<(), WindowError> {
+        self.native.set_maximum_size(width, height)
+    }
+
+    fn get_maximum_size(&self) -> Result<(i32, i32), WindowError> {
+        self.native.get_maximum_size()
+    }
+
+    fn set_bordered(&mut self, bordered: bool) -> Result<(), WindowError> {
+        self.native.set_bordered(bordered)
+    }
+
+    fn set_resizable(&mut self, resizable: bool) -> Result<(), WindowError> {
+        self.native.set_resizable(resizable)
+    }
+
+    fn set_always_on_top(&mut self, on_top: bool) -> Result<(), WindowError> {
+        self.native.set_always_on_top(on_top)
+    }
+
+    fn set_fill_document(&mut self, fill: bool) -> Result<(), WindowError> {
+        self.native.set_fill_document(fill)
+    }
+
+    fn show(&mut self) -> Result<(), WindowError> {
+        self.native.show()
+    }
+
+    fn hide(&mut self) -> Result<(), WindowError> {
+        self.native.hide()
+    }
+
+    fn raise(&mut self) -> Result<(), WindowError> {
+        self.native.raise()
+    }
+
+    fn maximize(&mut self) -> Result<(), WindowError> {
+        self.native.maximize()
+    }
+
+    fn minimize(&mut self) -> Result<(), WindowError> {
+        self.native.minimize()
+    }
+
+    fn restore(&mut self) -> Result<(), WindowError> {
+        self.native.restore()
+    }
+
+    fn set_fullscreen(&mut self, fullscreen: bool) -> Result<(), WindowError> {
+        self.native.set_fullscreen(fullscreen)
+    }
+
+    fn sync(&self) -> Result<(), WindowError> {
+        self.native.sync()
+    }
+
+    fn has_surface(&self) -> bool {
+        false
+    }
+
+    fn get_surface(&mut self) -> Result<WindowSurfaceRef<'_>, WindowError> {
+        Err(Self::software_surface_error())
+    }
+
+    fn set_surface_vsync(&mut self, _vsync: i32) -> Result<(), WindowError> {
+        Err(Self::software_surface_error())
+    }
+
+    fn get_surface_vsync(&self) -> Result<i32, WindowError> {
+        Err(Self::software_surface_error())
+    }
+
+    fn update_surface(&mut self) -> Result<(), WindowError> {
+        Err(Self::software_surface_error())
+    }
+
+    fn update_surface_rects(&mut self, _rects: &[WindowRect]) -> Result<(), WindowError> {
+        Err(Self::software_surface_error())
+    }
+
+    fn destroy_surface(&mut self) -> Result<(), WindowError> {
+        Err(Self::software_surface_error())
+    }
+
+    fn set_keyboard_grab(&mut self, grabbed: bool) -> Result<(), WindowError> {
+        self.native.set_keyboard_grab(grabbed)
+    }
+
+    fn set_mouse_grab(&mut self, grabbed: bool) -> Result<(), WindowError> {
+        self.native.set_mouse_grab(grabbed)
+    }
+
+    fn get_keyboard_grab(&self) -> bool {
+        self.native.get_keyboard_grab()
+    }
+
+    fn get_mouse_grab(&self) -> bool {
+        self.native.get_mouse_grab()
+    }
+
+    fn set_mouse_rect(&mut self, rect: Option<&WindowRect>) -> Result<(), WindowError> {
+        self.native.set_mouse_rect(rect)
+    }
+
+    fn get_mouse_rect(&self) -> Option<WindowRect> {
+        self.native.get_mouse_rect()
+    }
+
+    fn set_opacity(&mut self, opacity: f32) -> Result<(), WindowError> {
+        self.native.set_opacity(opacity)
+    }
+
+    fn get_opacity(&self) -> Result<f32, WindowError> {
+        self.native.get_opacity()
+    }
+
+    fn set_focusable(&mut self, focusable: bool) -> Result<(), WindowError> {
+        self.native.set_focusable(focusable)
+    }
+
+    fn show_system_menu(&mut self, x: i32, y: i32) -> Result<(), WindowError> {
+        self.native.show_system_menu(x, y)
+    }
+
+    fn set_hit_test(
+        &mut self,
+        hit_test: impl Fn(i32, i32) -> WindowHitTestResult + 'static,
+    ) -> Result<(), WindowError>
+    where
+        Self: Sized,
+    {
+        self.native.set_hit_test(hit_test)
+    }
+
+    fn set_shape(&mut self, shape: Option<&WindowSurfaceRef<'_>>) -> Result<(), WindowError> {
+        self.native.set_shape(shape)
+    }
+
+    fn flash(&mut self, operation: WindowFlashOperation) -> Result<(), WindowError> {
+        self.native.flash(operation)
+    }
+
+    fn set_progress_state(&mut self, state: WindowProgressState) -> Result<(), WindowError> {
+        self.native.set_progress_state(state)
+    }
+
+    fn get_progress_state(&self) -> Result<WindowProgressState, WindowError> {
+        self.native.get_progress_state()
+    }
+
+    fn set_progress_value(&mut self, value: f32) -> Result<(), WindowError> {
+        self.native.set_progress_value(value)
+    }
+
+    fn get_progress_value(&self) -> Result<f32, WindowError> {
+        self.native.get_progress_value()
+    }
+
+    fn display_handle(&self) -> Result<WindowDisplayHandle<'_>, WindowError> {
+        self.native.display_handle()
+    }
+
+    fn window_handle(&self) -> Result<WindowHandle<'_>, WindowError> {
+        self.native.window_handle()
+    }
+}
+
+impl From<WindowSystemCursor> for sys::mouse::SDL_SystemCursor {
+    fn from(value: WindowSystemCursor) -> Self {
+        Self(match value {
+            WindowSystemCursor::Default => 0,
+            WindowSystemCursor::Text => 1,
+            WindowSystemCursor::Wait => 2,
+            WindowSystemCursor::Crosshair => 3,
+            WindowSystemCursor::Progress => 4,
+            WindowSystemCursor::NwseResize => 5,
+            WindowSystemCursor::NeswResize => 6,
+            WindowSystemCursor::EwResize => 7,
+            WindowSystemCursor::NsResize => 8,
+            WindowSystemCursor::Move => 9,
+            WindowSystemCursor::NotAllowed => 10,
+            WindowSystemCursor::Pointer => 11,
+            WindowSystemCursor::NwResize => 12,
+            WindowSystemCursor::NResize => 13,
+            WindowSystemCursor::NeResize => 14,
+            WindowSystemCursor::EResize => 15,
+            WindowSystemCursor::SeResize => 16,
+            WindowSystemCursor::SResize => 17,
+            WindowSystemCursor::SwResize => 18,
+            WindowSystemCursor::WResize => 19,
+        })
+    }
 }

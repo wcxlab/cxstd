@@ -5,6 +5,31 @@ pub type WindowHandle<'a> = raw_window_handle::WindowHandle<'a>;
 pub type WindowHandleError = raw_window_handle::HandleError;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum WindowSystemCursor {
+    #[default]
+    Default,
+    Text,
+    Wait,
+    Crosshair,
+    Progress,
+    NwseResize,
+    NeswResize,
+    EwResize,
+    NsResize,
+    Move,
+    NotAllowed,
+    Pointer,
+    NwResize,
+    NResize,
+    NeResize,
+    EResize,
+    SeResize,
+    SResize,
+    SwResize,
+    WResize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct WindowId(pub u32);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -32,12 +57,6 @@ pub struct WindowDisplayMode {
 pub struct WindowSurfaceRef<'a> {
     pub(super) raw: NonNull<c_void>,
     pub(super) marker: PhantomData<&'a mut ()>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct WindowPoint {
-    pub x: i32,
-    pub y: i32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
