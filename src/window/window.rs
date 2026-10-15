@@ -1,5 +1,5 @@
 use super::{
-    WindowDisplayHandle, WindowDisplayId, WindowDisplayMode, WindowError, WindowFlags,
+    WindowDisplayHandle, WindowDisplayId, WindowDisplayMode, WindowError, WindowEvent, WindowFlags,
     WindowFlashOperation, WindowHandle, WindowHitTestResult, WindowId, WindowPixelFormat,
     WindowProgressState, WindowPropertiesId, WindowRect, WindowSurfaceRef, WindowSystemCursor,
 };
@@ -143,6 +143,34 @@ pub trait Window {
     fn display_handle(&self) -> Result<WindowDisplayHandle<'_>, WindowError>;
 
     fn window_handle(&self) -> Result<WindowHandle<'_>, WindowError>;
+}
+
+/// Host callbacks shared by native and GPU windows.
+/// SDL factories store the window and handler separately, and call `init` once.
+pub trait WindowHandler<W: Window + ?Sized> {
+    fn error(&mut self, error: WindowError) -> Result<(), WindowError> {
+        Err(error)
+    }
+
+    fn init(&mut self, _window: &mut W) -> Result<(), WindowError> {
+        Ok(())
+    }
+
+    fn update(&mut self, _window: &mut W) -> Result<(), WindowError> {
+        Ok(())
+    }
+
+    fn render(&mut self, _window: &mut W) -> Result<(), WindowError> {
+        Ok(())
+    }
+
+    fn window_event(&mut self, _window: &mut W, _event: &WindowEvent) -> Result<(), WindowError> {
+        Ok(())
+    }
+
+    fn frame_ready(&mut self, _window: &mut W) -> Result<(), WindowError> {
+        Ok(())
+    }
 }
 
 #[cfg(feature = "wgpu")]

@@ -1,11 +1,10 @@
-//! Window contracts with optional `sdl::init()?.create_window(...)` and
-//! `sdl::init()?.create_wgpu_window(...)` backends.
+//! Window contracts with optional `sdl::init()?.create_window(handler, options)` and
+//! `sdl::init()?.create_wgpu_window(handler, options)` backends.
 
 mod backends;
 mod error;
 mod event;
 mod flags;
-mod handler;
 mod types;
 mod window;
 
@@ -14,8 +13,7 @@ pub use backends::sdl;
 pub use error::WindowError;
 pub use event::*;
 pub use flags::WindowFlags;
-pub use handler::WindowHandler;
 pub use types::*;
-pub use window::Window;
 #[cfg(feature = "wgpu")]
 pub use window::{WgpuFrame, WgpuWindow};
+pub use window::{Window, WindowHandler};

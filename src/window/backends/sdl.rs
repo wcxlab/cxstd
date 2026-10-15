@@ -1,6 +1,11 @@
 //! `sdl_inst.create_wgpu_window(...)` pairs an owned SDL window with GPU presentation.
-//! Route events through `window.window_event(&event, &mut handler)`, then call
-//! `window.update(&mut handler)` and `window.render(&mut handler)` from the host loop.
+//! `sdl_inst.create_window(handler, WindowOptions { .. })` owns a native handler.
+//! `sdl_inst.create_wgpu_window(handler, WindowOptions { .. })` owns a GPU handler.
+//! Both return `SdlWindowWithHandler<W, H>` and initialize the handler once.
+//! `WindowHandler<W>` receives only the window; the handler is stored separately.
+//! Access native and GPU operations through `.window`, and application state through `.handler`.
+//! Route events through `window.window_event(&event)`.
+//! Call `window.update()` and `window.render()` from the host loop.
 //! Frame access is limited to the render callback; frames and surfaces drop before the native window.
 
 #[cfg(feature = "wgpu")]
@@ -40,10 +45,65 @@ pub struct SdlInstance {
     context: Rc<SdlContext>,
 }
 
-pub struct SdlWindow {
-    raw: NonNull<sys::video::SDL_Window>,
+pub struct SdlWindow<const GPU: bool = false> {
+    #[cfg(feature = "wgpu")]
+    frame: RefCell<Option<FrameResources>>,
+    #[cfg(feature = "wgpu")]
+    gpu: Option<WgpuContext>,
     hit_test: Box<Option<HitTestCallback>>,
     owner: Rc<SdlWindowOwner>,
+}
+
+#[cfg(feature = "wgpu")]
+pub type SdlWgpuWindow = SdlWindow<true>;
+
+pub struct SdlWindowWithHandler<W, H> {
+    pub handler: H,
+    pub window: W,
+}
+
+impl<const GPU: bool> SdlWindow<GPU> {
+    pub fn window_handle_provider(&self) -> Rc<dyn raw_window_handle::HasWindowHandle> {
+        self.owner.clone()
+    }
+}
+
+impl<W: Window, H: WindowHandler<W>> SdlWindowWithHandler<W, H> {
+    pub fn update(&mut self) -> Result<(), WindowError> {
+        self.handler
+            .update(&mut self.window)
+            .or_else(|error| self.handler.error(error))
+    }
+}
+
+impl<W: Window, H: WindowHandler<W>> SdlWindowWithHandler<W, H> {
+    fn new(window: W, handler: H) -> Result<Self, WindowError> {
+        let mut window = Self { handler, window };
+        window
+            .handler
+            .init(&mut window.window)
+            .or_else(|error| window.handler.error(error))?;
+        Ok(window)
+    }
+}
+
+impl<H: WindowHandler<SdlWindow>> SdlWindowWithHandler<SdlWindow, H> {
+    pub fn window_event(&mut self, event: &WindowEvent) -> Result<(), WindowError> {
+        self.handler
+            .window_event(&mut self.window, event)
+            .or_else(|error| self.handler.error(error))
+    }
+
+    pub fn render(&mut self) -> Result<bool, WindowError> {
+        if let Err(error) = self.handler.render(&mut self.window) {
+            self.handler.error(error)?;
+            return Ok(false);
+        }
+        self.handler
+            .frame_ready(&mut self.window)
+            .or_else(|error| self.handler.error(error))?;
+        Ok(true)
+    }
 }
 
 type HitTestCallback = Box<dyn Fn(i32, i32) -> WindowHitTestResult>;
@@ -87,20 +147,37 @@ pub fn init() -> Result<SdlInstance, WindowError> {
 impl SdlInstance {
     pub fn poll_event(&mut self) -> Option<WindowEvent> {
         let mut event = MaybeUninit::<sys::events::SDL_Event>::zeroed();
-        if unsafe { sys::events::SDL_PollEvent(event.as_mut_ptr()) } {
-            Some(unsafe { WindowEvent::from_sdl(event.assume_init_ref()) })
-        } else {
-            None
+        while unsafe { sys::events::SDL_PollEvent(event.as_mut_ptr()) } {
+            if let Some(event) = unsafe { WindowEvent::from_sdl(event.assume_init_ref()) } {
+                return Some(event);
+            }
         }
+        None
     }
 
-    pub fn create_window(
+    pub fn create_window<H: WindowHandler<SdlWindow>>(
         &self,
-        title: &str,
-        width: i32,
-        height: i32,
-        flags: WindowFlags,
-    ) -> Result<SdlWindow, WindowError> {
+        handler: H,
+        options: WindowOptions<'_>,
+    ) -> Result<SdlWindowWithHandler<SdlWindow, H>, WindowError> {
+        let window = self.create_native_window::<false>(options)?;
+        SdlWindowWithHandler::new(window, handler)
+    }
+}
+
+impl SdlInstance {
+    fn create_native_window<const GPU: bool>(
+        &self,
+        options: WindowOptions<'_>,
+    ) -> Result<SdlWindow<GPU>, WindowError> {
+        let WindowOptions {
+            title,
+            x,
+            y,
+            width,
+            height,
+            flags,
+        } = options;
         if flags.intersects(WindowFlags::MODAL | WindowFlags::TOOLTIP | WindowFlags::POPUP_MENU) {
             return Err(WindowError::Nul("child windows are not supported".into()));
         }
@@ -108,14 +185,19 @@ impl SdlInstance {
         let raw =
             unsafe { sys::video::SDL_CreateWindow(title.as_ptr(), width, height, flags.into()) };
         let raw = NonNull::new(raw).ok_or_else(Self::error)?;
-        Ok(SdlWindow {
-            raw,
+        let mut window = SdlWindow {
+            #[cfg(feature = "wgpu")]
+            frame: RefCell::new(None),
+            #[cfg(feature = "wgpu")]
+            gpu: None,
             hit_test: Box::new(None),
             owner: Rc::new(SdlWindowOwner {
                 raw,
                 context: Rc::clone(&self.context),
             }),
-        })
+        };
+        window.set_position(x, y)?;
+        Ok(window)
     }
 }
 
@@ -124,12 +206,6 @@ impl SdlInstance {
         unsafe { copy_string(sys::error::SDL_GetError()) }
             .map(WindowError::Nul)
             .unwrap_or(WindowError::Unknown)
-    }
-}
-
-impl SdlWindow {
-    pub fn window_handle_provider(&self) -> Rc<dyn raw_window_handle::HasWindowHandle> {
-        self.owner.clone()
     }
 }
 
@@ -142,9 +218,9 @@ impl raw_window_handle::HasWindowHandle for SdlWindowOwner {
     }
 }
 
-impl Window for SdlWindow {
+impl<const GPU: bool> Window for SdlWindow<GPU> {
     fn get_id(&self) -> Result<WindowId, WindowError> {
-        let value = unsafe { sys::video::SDL_GetWindowID(self.raw.as_ptr()) };
+        let value = unsafe { sys::video::SDL_GetWindowID(self.owner.raw.as_ptr()) };
         if value.0 == 0 {
             Err(SdlInstance::error())
         } else {
@@ -153,7 +229,7 @@ impl Window for SdlWindow {
     }
 
     fn get_display(&self) -> Result<WindowDisplayId, WindowError> {
-        let value = unsafe { sys::video::SDL_GetDisplayForWindow(self.raw.as_ptr()) };
+        let value = unsafe { sys::video::SDL_GetDisplayForWindow(self.owner.raw.as_ptr()) };
         if value.0 == 0 {
             Err(SdlInstance::error())
         } else {
@@ -162,7 +238,7 @@ impl Window for SdlWindow {
     }
 
     fn get_pixel_density(&self) -> Result<f32, WindowError> {
-        let value = unsafe { sys::video::SDL_GetWindowPixelDensity(self.raw.as_ptr()) };
+        let value = unsafe { sys::video::SDL_GetWindowPixelDensity(self.owner.raw.as_ptr()) };
         if value > 0.0 {
             Ok(value)
         } else {
@@ -171,7 +247,7 @@ impl Window for SdlWindow {
     }
 
     fn get_display_scale(&self) -> Result<f32, WindowError> {
-        let value = unsafe { sys::video::SDL_GetWindowDisplayScale(self.raw.as_ptr()) };
+        let value = unsafe { sys::video::SDL_GetWindowDisplayScale(self.owner.raw.as_ptr()) };
         if value > 0.0 {
             Ok(value)
         } else {
@@ -182,7 +258,7 @@ impl Window for SdlWindow {
     fn set_fullscreen_mode(&mut self, mode: Option<&WindowDisplayMode>) -> Result<(), WindowError> {
         let Some(mode) = mode else {
             return Self::result(unsafe {
-                sys::video::SDL_SetWindowFullscreenMode(self.raw.as_ptr(), std::ptr::null())
+                sys::video::SDL_SetWindowFullscreenMode(self.owner.raw.as_ptr(), std::ptr::null())
             });
         };
         let mut count = 0;
@@ -206,17 +282,20 @@ impl Window for SdlWindow {
                 "fullscreen mode is not available on the display".into(),
             ));
         }
-        Self::result(unsafe { sys::video::SDL_SetWindowFullscreenMode(self.raw.as_ptr(), matched) })
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowFullscreenMode(self.owner.raw.as_ptr(), matched)
+        })
     }
 
     fn get_fullscreen_mode(&self) -> Option<WindowDisplayMode> {
-        let mode = unsafe { sys::video::SDL_GetWindowFullscreenMode(self.raw.as_ptr()) };
+        let mode = unsafe { sys::video::SDL_GetWindowFullscreenMode(self.owner.raw.as_ptr()) };
         unsafe { mode.as_ref() }.map(WindowDisplayMode::from)
     }
 
     fn get_icc_profile(&self) -> Result<Vec<u8>, WindowError> {
         let mut size = 0;
-        let profile = unsafe { sys::video::SDL_GetWindowICCProfile(self.raw.as_ptr(), &mut size) };
+        let profile =
+            unsafe { sys::video::SDL_GetWindowICCProfile(self.owner.raw.as_ptr(), &mut size) };
         if profile.is_null() {
             return Err(SdlInstance::error());
         }
@@ -226,7 +305,7 @@ impl Window for SdlWindow {
     }
 
     fn get_pixel_format(&self) -> Result<WindowPixelFormat, WindowError> {
-        let format = unsafe { sys::video::SDL_GetWindowPixelFormat(self.raw.as_ptr()) };
+        let format = unsafe { sys::video::SDL_GetWindowPixelFormat(self.owner.raw.as_ptr()) };
         if format == sys::pixels::SDL_PixelFormat::UNKNOWN {
             Err(SdlInstance::error())
         } else {
@@ -235,7 +314,7 @@ impl Window for SdlWindow {
     }
 
     fn get_properties(&self) -> Result<WindowPropertiesId, WindowError> {
-        let value = unsafe { sys::video::SDL_GetWindowProperties(self.raw.as_ptr()) };
+        let value = unsafe { sys::video::SDL_GetWindowProperties(self.owner.raw.as_ptr()) };
         if value.0 == 0 {
             Err(SdlInstance::error())
         } else {
@@ -244,7 +323,7 @@ impl Window for SdlWindow {
     }
 
     fn get_flags(&self) -> WindowFlags {
-        unsafe { sys::video::SDL_GetWindowFlags(self.raw.as_ptr()) }.into()
+        unsafe { sys::video::SDL_GetWindowFlags(self.owner.raw.as_ptr()) }.into()
     }
 
     fn set_cursor(&mut self, cursor: WindowSystemCursor) -> Result<(), WindowError> {
@@ -265,47 +344,51 @@ impl Window for SdlWindow {
     }
 
     fn start_text_input(&mut self) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::keyboard::SDL_StartTextInput(self.raw.as_ptr()) })
+        Self::result(unsafe { sys::keyboard::SDL_StartTextInput(self.owner.raw.as_ptr()) })
     }
 
     fn stop_text_input(&mut self) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::keyboard::SDL_StopTextInput(self.raw.as_ptr()) })
+        Self::result(unsafe { sys::keyboard::SDL_StopTextInput(self.owner.raw.as_ptr()) })
     }
 
     fn set_title(&mut self, title: &str) -> Result<(), WindowError> {
         let title = CString::new(title).map_err(|error| WindowError::Nul(error.to_string()))?;
-        Self::result(unsafe { sys::video::SDL_SetWindowTitle(self.raw.as_ptr(), title.as_ptr()) })
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowTitle(self.owner.raw.as_ptr(), title.as_ptr())
+        })
     }
 
     fn get_title(&self) -> String {
-        unsafe { copy_string(sys::video::SDL_GetWindowTitle(self.raw.as_ptr())) }
+        unsafe { copy_string(sys::video::SDL_GetWindowTitle(self.owner.raw.as_ptr())) }
             .unwrap_or_default()
     }
 
     fn set_icon(&mut self, icon: &WindowSurfaceRef<'_>) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_SetWindowIcon(self.raw.as_ptr(), icon.into()) })
+        Self::result(unsafe { sys::video::SDL_SetWindowIcon(self.owner.raw.as_ptr(), icon.into()) })
     }
 
     fn set_position(&mut self, x: i32, y: i32) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_SetWindowPosition(self.raw.as_ptr(), x, y) })
+        Self::result(unsafe { sys::video::SDL_SetWindowPosition(self.owner.raw.as_ptr(), x, y) })
     }
 
     fn get_position(&self) -> Result<(i32, i32), WindowError> {
         let (mut first, mut second) = (0, 0);
         Self::result(unsafe {
-            sys::video::SDL_GetWindowPosition(self.raw.as_ptr(), &mut first, &mut second)
+            sys::video::SDL_GetWindowPosition(self.owner.raw.as_ptr(), &mut first, &mut second)
         })?;
         Ok((first, second))
     }
 
     fn set_size(&mut self, width: i32, height: i32) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_SetWindowSize(self.raw.as_ptr(), width, height) })
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowSize(self.owner.raw.as_ptr(), width, height)
+        })
     }
 
     fn get_size(&self) -> Result<(i32, i32), WindowError> {
         let (mut first, mut second) = (0, 0);
         Self::result(unsafe {
-            sys::video::SDL_GetWindowSize(self.raw.as_ptr(), &mut first, &mut second)
+            sys::video::SDL_GetWindowSize(self.owner.raw.as_ptr(), &mut first, &mut second)
         })?;
         Ok((first, second))
     }
@@ -317,20 +400,22 @@ impl Window for SdlWindow {
             w: 0,
             h: 0,
         };
-        Self::result(unsafe { sys::video::SDL_GetWindowSafeArea(self.raw.as_ptr(), &mut rect) })?;
+        Self::result(unsafe {
+            sys::video::SDL_GetWindowSafeArea(self.owner.raw.as_ptr(), &mut rect)
+        })?;
         Ok(rect.into())
     }
 
     fn set_aspect_ratio(&mut self, min_aspect: f32, max_aspect: f32) -> Result<(), WindowError> {
         Self::result(unsafe {
-            sys::video::SDL_SetWindowAspectRatio(self.raw.as_ptr(), min_aspect, max_aspect)
+            sys::video::SDL_SetWindowAspectRatio(self.owner.raw.as_ptr(), min_aspect, max_aspect)
         })
     }
 
     fn get_aspect_ratio(&self) -> Result<(f32, f32), WindowError> {
         let (mut first, mut second) = (0.0, 0.0);
         Self::result(unsafe {
-            sys::video::SDL_GetWindowAspectRatio(self.raw.as_ptr(), &mut first, &mut second)
+            sys::video::SDL_GetWindowAspectRatio(self.owner.raw.as_ptr(), &mut first, &mut second)
         })?;
         Ok((first, second))
     }
@@ -339,7 +424,7 @@ impl Window for SdlWindow {
         let (mut top, mut left, mut bottom, mut right) = (0, 0, 0, 0);
         Self::result(unsafe {
             sys::video::SDL_GetWindowBordersSize(
-                self.raw.as_ptr(),
+                self.owner.raw.as_ptr(),
                 &mut top,
                 &mut left,
                 &mut bottom,
@@ -352,93 +437,108 @@ impl Window for SdlWindow {
     fn get_size_in_pixels(&self) -> Result<(i32, i32), WindowError> {
         let (mut first, mut second) = (0, 0);
         Self::result(unsafe {
-            sys::video::SDL_GetWindowSizeInPixels(self.raw.as_ptr(), &mut first, &mut second)
+            sys::video::SDL_GetWindowSizeInPixels(self.owner.raw.as_ptr(), &mut first, &mut second)
         })?;
         Ok((first, second))
     }
 
     fn set_minimum_size(&mut self, width: i32, height: i32) -> Result<(), WindowError> {
         Self::result(unsafe {
-            sys::video::SDL_SetWindowMinimumSize(self.raw.as_ptr(), width, height)
+            sys::video::SDL_SetWindowMinimumSize(self.owner.raw.as_ptr(), width, height)
         })
     }
 
     fn get_minimum_size(&self) -> Result<(i32, i32), WindowError> {
         let (mut first, mut second) = (0, 0);
         Self::result(unsafe {
-            sys::video::SDL_GetWindowMinimumSize(self.raw.as_ptr(), &mut first, &mut second)
+            sys::video::SDL_GetWindowMinimumSize(self.owner.raw.as_ptr(), &mut first, &mut second)
         })?;
         Ok((first, second))
     }
 
     fn set_maximum_size(&mut self, width: i32, height: i32) -> Result<(), WindowError> {
         Self::result(unsafe {
-            sys::video::SDL_SetWindowMaximumSize(self.raw.as_ptr(), width, height)
+            sys::video::SDL_SetWindowMaximumSize(self.owner.raw.as_ptr(), width, height)
         })
     }
 
     fn get_maximum_size(&self) -> Result<(i32, i32), WindowError> {
         let (mut first, mut second) = (0, 0);
         Self::result(unsafe {
-            sys::video::SDL_GetWindowMaximumSize(self.raw.as_ptr(), &mut first, &mut second)
+            sys::video::SDL_GetWindowMaximumSize(self.owner.raw.as_ptr(), &mut first, &mut second)
         })?;
         Ok((first, second))
     }
 
     fn set_bordered(&mut self, bordered: bool) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_SetWindowBordered(self.raw.as_ptr(), bordered) })
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowBordered(self.owner.raw.as_ptr(), bordered)
+        })
     }
 
     fn set_resizable(&mut self, resizable: bool) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_SetWindowResizable(self.raw.as_ptr(), resizable) })
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowResizable(self.owner.raw.as_ptr(), resizable)
+        })
     }
 
     fn set_always_on_top(&mut self, on_top: bool) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_SetWindowAlwaysOnTop(self.raw.as_ptr(), on_top) })
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowAlwaysOnTop(self.owner.raw.as_ptr(), on_top)
+        })
     }
 
     fn set_fill_document(&mut self, fill: bool) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_SetWindowFillDocument(self.raw.as_ptr(), fill) })
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowFillDocument(self.owner.raw.as_ptr(), fill)
+        })
     }
 
     fn show(&mut self) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_ShowWindow(self.raw.as_ptr()) })
+        Self::result(unsafe { sys::video::SDL_ShowWindow(self.owner.raw.as_ptr()) })
     }
 
     fn hide(&mut self) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_HideWindow(self.raw.as_ptr()) })
+        Self::result(unsafe { sys::video::SDL_HideWindow(self.owner.raw.as_ptr()) })
     }
 
     fn raise(&mut self) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_RaiseWindow(self.raw.as_ptr()) })
+        Self::result(unsafe { sys::video::SDL_RaiseWindow(self.owner.raw.as_ptr()) })
     }
 
     fn maximize(&mut self) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_MaximizeWindow(self.raw.as_ptr()) })
+        Self::result(unsafe { sys::video::SDL_MaximizeWindow(self.owner.raw.as_ptr()) })
     }
 
     fn minimize(&mut self) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_MinimizeWindow(self.raw.as_ptr()) })
+        Self::result(unsafe { sys::video::SDL_MinimizeWindow(self.owner.raw.as_ptr()) })
     }
 
     fn restore(&mut self) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_RestoreWindow(self.raw.as_ptr()) })
+        Self::result(unsafe { sys::video::SDL_RestoreWindow(self.owner.raw.as_ptr()) })
     }
 
     fn set_fullscreen(&mut self, fullscreen: bool) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_SetWindowFullscreen(self.raw.as_ptr(), fullscreen) })
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowFullscreen(self.owner.raw.as_ptr(), fullscreen)
+        })
     }
 
     fn sync(&self) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_SyncWindow(self.raw.as_ptr()) })
+        Self::result(unsafe { sys::video::SDL_SyncWindow(self.owner.raw.as_ptr()) })
     }
 
     fn has_surface(&self) -> bool {
-        unsafe { sys::video::SDL_WindowHasSurface(self.raw.as_ptr()) }
+        !GPU && unsafe { sys::video::SDL_WindowHasSurface(self.owner.raw.as_ptr()) }
     }
 
     fn get_surface(&mut self) -> Result<WindowSurfaceRef<'_>, WindowError> {
-        let surface = unsafe { sys::video::SDL_GetWindowSurface(self.raw.as_ptr()) };
+        if GPU {
+            return Err(WindowError::Nul(
+                "SDL software surfaces are not available on a wgpu window".into(),
+            ));
+        }
+        let surface = unsafe { sys::video::SDL_GetWindowSurface(self.owner.raw.as_ptr()) };
         Ok(WindowSurfaceRef {
             raw: NonNull::new(surface).ok_or_else(SdlInstance::error)?.cast(),
             marker: PhantomData,
@@ -446,71 +546,102 @@ impl Window for SdlWindow {
     }
 
     fn set_surface_vsync(&mut self, vsync: i32) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_SetWindowSurfaceVSync(self.raw.as_ptr(), vsync) })
+        if GPU {
+            return Err(WindowError::Nul(
+                "SDL software surfaces are not available on a wgpu window".into(),
+            ));
+        }
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowSurfaceVSync(self.owner.raw.as_ptr(), vsync)
+        })
     }
 
     fn get_surface_vsync(&self) -> Result<i32, WindowError> {
+        if GPU {
+            return Err(WindowError::Nul(
+                "SDL software surfaces are not available on a wgpu window".into(),
+            ));
+        }
         let mut vsync = 0;
         Self::result(unsafe {
-            sys::video::SDL_GetWindowSurfaceVSync(self.raw.as_ptr(), &mut vsync)
+            sys::video::SDL_GetWindowSurfaceVSync(self.owner.raw.as_ptr(), &mut vsync)
         })?;
         Ok(vsync)
     }
 
     fn update_surface(&mut self) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_UpdateWindowSurface(self.raw.as_ptr()) })
+        if GPU {
+            return Err(WindowError::Nul(
+                "SDL software surfaces are not available on a wgpu window".into(),
+            ));
+        }
+        Self::result(unsafe { sys::video::SDL_UpdateWindowSurface(self.owner.raw.as_ptr()) })
     }
 
     fn update_surface_rects(&mut self, rects: &[WindowRect]) -> Result<(), WindowError> {
+        if GPU {
+            return Err(WindowError::Nul(
+                "SDL software surfaces are not available on a wgpu window".into(),
+            ));
+        }
         let count =
             i32::try_from(rects.len()).map_err(|error| WindowError::Nul(error.to_string()))?;
         let rects: Vec<sys::rect::SDL_Rect> = rects.iter().copied().map(Into::into).collect();
         Self::result(unsafe {
-            sys::video::SDL_UpdateWindowSurfaceRects(self.raw.as_ptr(), rects.as_ptr(), count)
+            sys::video::SDL_UpdateWindowSurfaceRects(self.owner.raw.as_ptr(), rects.as_ptr(), count)
         })
     }
 
     fn destroy_surface(&mut self) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_DestroyWindowSurface(self.raw.as_ptr()) })
+        if GPU {
+            return Err(WindowError::Nul(
+                "SDL software surfaces are not available on a wgpu window".into(),
+            ));
+        }
+        Self::result(unsafe { sys::video::SDL_DestroyWindowSurface(self.owner.raw.as_ptr()) })
     }
 
     fn set_keyboard_grab(&mut self, grabbed: bool) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_SetWindowKeyboardGrab(self.raw.as_ptr(), grabbed) })
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowKeyboardGrab(self.owner.raw.as_ptr(), grabbed)
+        })
     }
 
     fn set_mouse_grab(&mut self, grabbed: bool) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_SetWindowMouseGrab(self.raw.as_ptr(), grabbed) })
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowMouseGrab(self.owner.raw.as_ptr(), grabbed)
+        })
     }
 
     fn get_keyboard_grab(&self) -> bool {
-        unsafe { sys::video::SDL_GetWindowKeyboardGrab(self.raw.as_ptr()) }
+        unsafe { sys::video::SDL_GetWindowKeyboardGrab(self.owner.raw.as_ptr()) }
     }
 
     fn get_mouse_grab(&self) -> bool {
-        unsafe { sys::video::SDL_GetWindowMouseGrab(self.raw.as_ptr()) }
+        unsafe { sys::video::SDL_GetWindowMouseGrab(self.owner.raw.as_ptr()) }
     }
 
     fn set_mouse_rect(&mut self, rect: Option<&WindowRect>) -> Result<(), WindowError> {
         let rect = rect.copied().map(sys::rect::SDL_Rect::from);
         Self::result(unsafe {
             sys::video::SDL_SetWindowMouseRect(
-                self.raw.as_ptr(),
+                self.owner.raw.as_ptr(),
                 rect.as_ref().map_or(std::ptr::null(), |rect| rect),
             )
         })
     }
 
     fn get_mouse_rect(&self) -> Option<WindowRect> {
-        let rect = unsafe { sys::video::SDL_GetWindowMouseRect(self.raw.as_ptr()) };
+        let rect = unsafe { sys::video::SDL_GetWindowMouseRect(self.owner.raw.as_ptr()) };
         unsafe { rect.as_ref() }.copied().map(Into::into)
     }
 
     fn set_opacity(&mut self, opacity: f32) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_SetWindowOpacity(self.raw.as_ptr(), opacity) })
+        Self::result(unsafe { sys::video::SDL_SetWindowOpacity(self.owner.raw.as_ptr(), opacity) })
     }
 
     fn get_opacity(&self) -> Result<f32, WindowError> {
-        let value = unsafe { sys::video::SDL_GetWindowOpacity(self.raw.as_ptr()) };
+        let value = unsafe { sys::video::SDL_GetWindowOpacity(self.owner.raw.as_ptr()) };
         if value < 0.0 {
             Err(SdlInstance::error())
         } else {
@@ -519,11 +650,13 @@ impl Window for SdlWindow {
     }
 
     fn set_focusable(&mut self, focusable: bool) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_SetWindowFocusable(self.raw.as_ptr(), focusable) })
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowFocusable(self.owner.raw.as_ptr(), focusable)
+        })
     }
 
     fn show_system_menu(&mut self, x: i32, y: i32) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_ShowWindowSystemMenu(self.raw.as_ptr(), x, y) })
+        Self::result(unsafe { sys::video::SDL_ShowWindowSystemMenu(self.owner.raw.as_ptr(), x, y) })
     }
 
     fn set_hit_test(
@@ -536,7 +669,11 @@ impl Window for SdlWindow {
         let previous = self.hit_test.replace(Box::new(hit_test));
         let data = (&mut *self.hit_test as *mut Option<HitTestCallback>).cast();
         let result = Self::result(unsafe {
-            sys::video::SDL_SetWindowHitTest(self.raw.as_ptr(), Some(Self::hit_test_callback), data)
+            sys::video::SDL_SetWindowHitTest(
+                self.owner.raw.as_ptr(),
+                Some(Self::hit_test_callback),
+                data,
+            )
         });
         drop(previous);
         result
@@ -545,24 +682,26 @@ impl Window for SdlWindow {
     fn set_shape(&mut self, shape: Option<&WindowSurfaceRef<'_>>) -> Result<(), WindowError> {
         Self::result(unsafe {
             sys::video::SDL_SetWindowShape(
-                self.raw.as_ptr(),
+                self.owner.raw.as_ptr(),
                 shape.map_or(std::ptr::null_mut(), Into::into),
             )
         })
     }
 
     fn flash(&mut self, operation: WindowFlashOperation) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_FlashWindow(self.raw.as_ptr(), operation.into()) })
+        Self::result(unsafe {
+            sys::video::SDL_FlashWindow(self.owner.raw.as_ptr(), operation.into())
+        })
     }
 
     fn set_progress_state(&mut self, state: WindowProgressState) -> Result<(), WindowError> {
         Self::result(unsafe {
-            sys::video::SDL_SetWindowProgressState(self.raw.as_ptr(), state.into())
+            sys::video::SDL_SetWindowProgressState(self.owner.raw.as_ptr(), state.into())
         })
     }
 
     fn get_progress_state(&self) -> Result<WindowProgressState, WindowError> {
-        let state = unsafe { sys::video::SDL_GetWindowProgressState(self.raw.as_ptr()) };
+        let state = unsafe { sys::video::SDL_GetWindowProgressState(self.owner.raw.as_ptr()) };
         if state == sys::video::SDL_ProgressState::INVALID {
             Err(SdlInstance::error())
         } else {
@@ -571,11 +710,13 @@ impl Window for SdlWindow {
     }
 
     fn set_progress_value(&mut self, value: f32) -> Result<(), WindowError> {
-        Self::result(unsafe { sys::video::SDL_SetWindowProgressValue(self.raw.as_ptr(), value) })
+        Self::result(unsafe {
+            sys::video::SDL_SetWindowProgressValue(self.owner.raw.as_ptr(), value)
+        })
     }
 
     fn get_progress_value(&self) -> Result<f32, WindowError> {
-        let value = unsafe { sys::video::SDL_GetWindowProgressValue(self.raw.as_ptr()) };
+        let value = unsafe { sys::video::SDL_GetWindowProgressValue(self.owner.raw.as_ptr()) };
         if value < 0.0 {
             Err(SdlInstance::error())
         } else {
@@ -752,7 +893,7 @@ impl SdlWindowOwner {
     }
 }
 
-impl SdlWindow {
+impl<const GPU: bool> SdlWindow<GPU> {
     fn result(success: bool) -> Result<(), WindowError> {
         if success {
             Ok(())
@@ -780,11 +921,15 @@ impl SdlWindow {
     }
 }
 
-impl Drop for SdlWindow {
+impl<const GPU: bool> Drop for SdlWindow<GPU> {
     fn drop(&mut self) {
         if self.hit_test.is_some() {
             unsafe {
-                sys::video::SDL_SetWindowHitTest(self.raw.as_ptr(), None, std::ptr::null_mut())
+                sys::video::SDL_SetWindowHitTest(
+                    self.owner.raw.as_ptr(),
+                    None,
+                    std::ptr::null_mut(),
+                )
             };
         }
     }
@@ -815,1297 +960,6 @@ impl Drop for SdlContext {
     }
 }
 
-impl From<sys::video::SDL_WindowID> for WindowId {
-    fn from(value: sys::video::SDL_WindowID) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<WindowId> for sys::video::SDL_WindowID {
-    fn from(value: WindowId) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::video::SDL_DisplayID> for WindowDisplayId {
-    fn from(value: sys::video::SDL_DisplayID) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<WindowDisplayId> for sys::video::SDL_DisplayID {
-    fn from(value: WindowDisplayId) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::properties::SDL_PropertiesID> for WindowPropertiesId {
-    fn from(value: sys::properties::SDL_PropertiesID) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<WindowPropertiesId> for sys::properties::SDL_PropertiesID {
-    fn from(value: WindowPropertiesId) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::pixels::SDL_PixelFormat> for WindowPixelFormat {
-    fn from(value: sys::pixels::SDL_PixelFormat) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<WindowPixelFormat> for sys::pixels::SDL_PixelFormat {
-    fn from(value: WindowPixelFormat) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<u32> for WindowId {
-    fn from(value: u32) -> Self {
-        Self(value)
-    }
-}
-
-impl From<&sys::video::SDL_DisplayMode> for WindowDisplayMode {
-    fn from(value: &sys::video::SDL_DisplayMode) -> Self {
-        Self {
-            display_id: value.displayID.into(),
-            format: value.format.into(),
-            width: value.w,
-            height: value.h,
-            pixel_density: value.pixel_density,
-            refresh_rate: value.refresh_rate,
-            refresh_rate_numerator: value.refresh_rate_numerator,
-            refresh_rate_denominator: value.refresh_rate_denominator,
-            internal: value.internal.cast(),
-        }
-    }
-}
-
-impl From<sys::video::SDL_DisplayMode> for WindowDisplayMode {
-    fn from(value: sys::video::SDL_DisplayMode) -> Self {
-        Self::from(&value)
-    }
-}
-
-impl<'a> From<&'a mut sys::surface::SDL_Surface> for WindowSurfaceRef<'a> {
-    fn from(value: &'a mut sys::surface::SDL_Surface) -> Self {
-        Self {
-            raw: NonNull::from(value).cast(),
-            marker: PhantomData,
-        }
-    }
-}
-
-impl From<&WindowSurfaceRef<'_>> for *mut sys::surface::SDL_Surface {
-    fn from(value: &WindowSurfaceRef<'_>) -> Self {
-        value.raw.cast().as_ptr()
-    }
-}
-
-impl From<sys::rect::SDL_Rect> for WindowRect {
-    fn from(value: sys::rect::SDL_Rect) -> Self {
-        Self {
-            x: value.x,
-            y: value.y,
-            width: value.w,
-            height: value.h,
-        }
-    }
-}
-
-impl From<WindowRect> for sys::rect::SDL_Rect {
-    fn from(value: WindowRect) -> Self {
-        Self {
-            x: value.x,
-            y: value.y,
-            w: value.width,
-            h: value.height,
-        }
-    }
-}
-
-impl From<sys::video::SDL_WindowFlags> for WindowFlags {
-    fn from(value: sys::video::SDL_WindowFlags) -> Self {
-        Self::from_bits_retain(value.0)
-    }
-}
-
-impl From<WindowFlags> for sys::video::SDL_WindowFlags {
-    fn from(value: WindowFlags) -> Self {
-        Self(value.bits())
-    }
-}
-
-impl From<sys::video::SDL_FlashOperation> for WindowFlashOperation {
-    fn from(value: sys::video::SDL_FlashOperation) -> Self {
-        match value {
-            sys::video::SDL_FlashOperation::CANCEL => Self::Cancel,
-            sys::video::SDL_FlashOperation::BRIEFLY => Self::Briefly,
-            sys::video::SDL_FlashOperation::UNTIL_FOCUSED => Self::UntilFocused,
-            value => Self::Unknown(value.0),
-        }
-    }
-}
-
-impl From<WindowFlashOperation> for sys::video::SDL_FlashOperation {
-    fn from(value: WindowFlashOperation) -> Self {
-        match value {
-            WindowFlashOperation::Cancel => Self::CANCEL,
-            WindowFlashOperation::Briefly => Self::BRIEFLY,
-            WindowFlashOperation::UntilFocused => Self::UNTIL_FOCUSED,
-            WindowFlashOperation::Unknown(value) => Self(value),
-        }
-    }
-}
-
-impl From<sys::video::SDL_HitTestResult> for WindowHitTestResult {
-    fn from(value: sys::video::SDL_HitTestResult) -> Self {
-        match value {
-            sys::video::SDL_HitTestResult::NORMAL => Self::Normal,
-            sys::video::SDL_HitTestResult::DRAGGABLE => Self::Draggable,
-            sys::video::SDL_HitTestResult::RESIZE_TOPLEFT => Self::ResizeTopLeft,
-            sys::video::SDL_HitTestResult::RESIZE_TOP => Self::ResizeTop,
-            sys::video::SDL_HitTestResult::RESIZE_TOPRIGHT => Self::ResizeTopRight,
-            sys::video::SDL_HitTestResult::RESIZE_RIGHT => Self::ResizeRight,
-            sys::video::SDL_HitTestResult::RESIZE_BOTTOMRIGHT => Self::ResizeBottomRight,
-            sys::video::SDL_HitTestResult::RESIZE_BOTTOM => Self::ResizeBottom,
-            sys::video::SDL_HitTestResult::RESIZE_BOTTOMLEFT => Self::ResizeBottomLeft,
-            sys::video::SDL_HitTestResult::RESIZE_LEFT => Self::ResizeLeft,
-            value => Self::Unknown(value.0),
-        }
-    }
-}
-
-impl From<WindowHitTestResult> for sys::video::SDL_HitTestResult {
-    fn from(value: WindowHitTestResult) -> Self {
-        match value {
-            WindowHitTestResult::Normal => Self::NORMAL,
-            WindowHitTestResult::Draggable => Self::DRAGGABLE,
-            WindowHitTestResult::ResizeTopLeft => Self::RESIZE_TOPLEFT,
-            WindowHitTestResult::ResizeTop => Self::RESIZE_TOP,
-            WindowHitTestResult::ResizeTopRight => Self::RESIZE_TOPRIGHT,
-            WindowHitTestResult::ResizeRight => Self::RESIZE_RIGHT,
-            WindowHitTestResult::ResizeBottomRight => Self::RESIZE_BOTTOMRIGHT,
-            WindowHitTestResult::ResizeBottom => Self::RESIZE_BOTTOM,
-            WindowHitTestResult::ResizeBottomLeft => Self::RESIZE_BOTTOMLEFT,
-            WindowHitTestResult::ResizeLeft => Self::RESIZE_LEFT,
-            WindowHitTestResult::Unknown(value) => Self(value),
-        }
-    }
-}
-
-impl From<sys::video::SDL_ProgressState> for WindowProgressState {
-    fn from(value: sys::video::SDL_ProgressState) -> Self {
-        match value {
-            sys::video::SDL_ProgressState::INVALID => Self::Invalid,
-            sys::video::SDL_ProgressState::NONE => Self::None,
-            sys::video::SDL_ProgressState::INDETERMINATE => Self::Indeterminate,
-            sys::video::SDL_ProgressState::NORMAL => Self::Normal,
-            sys::video::SDL_ProgressState::PAUSED => Self::Paused,
-            sys::video::SDL_ProgressState::ERROR => Self::Error,
-            value => Self::Unknown(value.0),
-        }
-    }
-}
-
-impl From<WindowProgressState> for sys::video::SDL_ProgressState {
-    fn from(value: WindowProgressState) -> Self {
-        match value {
-            WindowProgressState::Invalid => Self::INVALID,
-            WindowProgressState::None => Self::NONE,
-            WindowProgressState::Indeterminate => Self::INDETERMINATE,
-            WindowProgressState::Normal => Self::NORMAL,
-            WindowProgressState::Paused => Self::PAUSED,
-            WindowProgressState::Error => Self::ERROR,
-            WindowProgressState::Unknown(value) => Self(value),
-        }
-    }
-}
-
-impl From<sys::events::SDL_EventType> for WindowEventCode {
-    fn from(value: sys::events::SDL_EventType) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::keyboard::SDL_KeyboardID> for WindowKeyboardId {
-    fn from(value: sys::keyboard::SDL_KeyboardID) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::mouse::SDL_MouseID> for WindowMouseId {
-    fn from(value: sys::mouse::SDL_MouseID) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::joystick::SDL_JoystickID> for WindowJoystickId {
-    fn from(value: sys::joystick::SDL_JoystickID) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::audio::SDL_AudioDeviceID> for WindowAudioDeviceId {
-    fn from(value: sys::audio::SDL_AudioDeviceID) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::camera::SDL_CameraID> for WindowCameraId {
-    fn from(value: sys::camera::SDL_CameraID) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::sensor::SDL_SensorID> for WindowSensorId {
-    fn from(value: sys::sensor::SDL_SensorID) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::touch::SDL_TouchID> for WindowTouchId {
-    fn from(value: sys::touch::SDL_TouchID) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::touch::SDL_FingerID> for WindowFingerId {
-    fn from(value: sys::touch::SDL_FingerID) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::pen::SDL_PenID> for WindowPenId {
-    fn from(value: sys::pen::SDL_PenID) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::scancode::SDL_Scancode> for WindowScancode {
-    fn from(value: sys::scancode::SDL_Scancode) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::keycode::SDL_Keycode> for WindowKeycode {
-    fn from(value: sys::keycode::SDL_Keycode) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::keycode::SDL_Keymod> for WindowKeymod {
-    fn from(value: sys::keycode::SDL_Keymod) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::mouse::SDL_MouseButtonFlags> for WindowMouseButtonFlags {
-    fn from(value: sys::mouse::SDL_MouseButtonFlags) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::mouse::SDL_MouseWheelDirection> for WindowMouseWheelDirection {
-    fn from(value: sys::mouse::SDL_MouseWheelDirection) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::power::SDL_PowerState> for WindowPowerState {
-    fn from(value: sys::power::SDL_PowerState) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::pen::SDL_PenInputFlags> for WindowPenInputFlags {
-    fn from(value: sys::pen::SDL_PenInputFlags) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::pen::SDL_PenDeviceType> for WindowPenDeviceType {
-    fn from(value: sys::pen::SDL_PenDeviceType) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::pen::SDL_PenAxis> for WindowPenAxis {
-    fn from(value: sys::pen::SDL_PenAxis) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<sys::events::SDL_CommonEvent> for WindowCommonEvent {
-    fn from(value: sys::events::SDL_CommonEvent) -> Self {
-        Self {
-            event_type: value.r#type,
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-        }
-    }
-}
-
-impl From<sys::events::SDL_DisplayEvent> for WindowDisplayEvent {
-    fn from(value: sys::events::SDL_DisplayEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            display_id: value.displayID.into(),
-            data1: value.data1,
-            data2: value.data2,
-        }
-    }
-}
-
-impl From<sys::events::SDL_KeyboardDeviceEvent> for WindowKeyboardDeviceEvent {
-    fn from(value: sys::events::SDL_KeyboardDeviceEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            which: value.which.into(),
-        }
-    }
-}
-
-impl From<sys::events::SDL_KeyboardEvent> for WindowKeyboardEvent {
-    fn from(value: sys::events::SDL_KeyboardEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            window_id: value.windowID.into(),
-            which: value.which.into(),
-            scancode: value.scancode.into(),
-            key: value.key.into(),
-            modifiers: value.r#mod.into(),
-            raw: value.raw,
-            down: value.down,
-            repeat: value.repeat,
-        }
-    }
-}
-
-impl WindowTextEditingEvent {
-    /// # Safety
-    /// All non-null string pointers and counted arrays must be valid for reading.
-    /// Each string must be NUL-terminated and remain valid during this call.
-    pub unsafe fn from_sdl(value: &sys::events::SDL_TextEditingEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            window_id: value.windowID.into(),
-            text: unsafe { copy_string(value.text) }.unwrap_or_default(),
-            start: value.start,
-            length: value.length,
-        }
-    }
-}
-
-impl WindowTextEditingCandidatesEvent {
-    /// # Safety
-    /// All non-null string pointers and counted arrays must be valid for reading.
-    /// Each string must be NUL-terminated and remain valid during this call.
-    pub unsafe fn from_sdl(value: &sys::events::SDL_TextEditingCandidatesEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            window_id: value.windowID.into(),
-            candidates: unsafe { copy_strings(value.candidates, value.num_candidates) },
-            num_candidates: value.num_candidates,
-            selected_candidate: value.selected_candidate,
-            horizontal: value.horizontal,
-        }
-    }
-}
-
-impl WindowTextInputEvent {
-    /// # Safety
-    /// All non-null string pointers and counted arrays must be valid for reading.
-    /// Each string must be NUL-terminated and remain valid during this call.
-    pub unsafe fn from_sdl(value: &sys::events::SDL_TextInputEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            window_id: value.windowID.into(),
-            text: unsafe { copy_string(value.text) }.unwrap_or_default(),
-        }
-    }
-}
-
-impl From<sys::events::SDL_MouseDeviceEvent> for WindowMouseDeviceEvent {
-    fn from(value: sys::events::SDL_MouseDeviceEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            which: value.which.into(),
-        }
-    }
-}
-
-impl From<sys::events::SDL_MouseMotionEvent> for WindowMouseMotionEvent {
-    fn from(value: sys::events::SDL_MouseMotionEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            window_id: value.windowID.into(),
-            which: value.which.into(),
-            state: value.state.into(),
-            x: value.x,
-            y: value.y,
-            xrel: value.xrel,
-            yrel: value.yrel,
-        }
-    }
-}
-
-impl From<sys::events::SDL_MouseButtonEvent> for WindowMouseButtonEvent {
-    fn from(value: sys::events::SDL_MouseButtonEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            window_id: value.windowID.into(),
-            which: value.which.into(),
-            button: value.button,
-            down: value.down,
-            clicks: value.clicks,
-            x: value.x,
-            y: value.y,
-        }
-    }
-}
-
-impl From<sys::events::SDL_MouseWheelEvent> for WindowMouseWheelEvent {
-    fn from(value: sys::events::SDL_MouseWheelEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            window_id: value.windowID.into(),
-            which: value.which.into(),
-            x: value.x,
-            y: value.y,
-            direction: value.direction.into(),
-            mouse_x: value.mouse_x,
-            mouse_y: value.mouse_y,
-            integer_x: value.integer_x,
-            integer_y: value.integer_y,
-        }
-    }
-}
-
-impl From<sys::events::SDL_JoyAxisEvent> for WindowJoyAxisEvent {
-    fn from(value: sys::events::SDL_JoyAxisEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            which: value.which.into(),
-            axis: value.axis,
-            value: value.value,
-        }
-    }
-}
-
-impl From<sys::events::SDL_JoyBallEvent> for WindowJoyBallEvent {
-    fn from(value: sys::events::SDL_JoyBallEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            which: value.which.into(),
-            ball: value.ball,
-            xrel: value.xrel,
-            yrel: value.yrel,
-        }
-    }
-}
-
-impl From<sys::events::SDL_JoyHatEvent> for WindowJoyHatEvent {
-    fn from(value: sys::events::SDL_JoyHatEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            which: value.which.into(),
-            hat: value.hat,
-            value: value.value,
-        }
-    }
-}
-
-impl From<sys::events::SDL_JoyButtonEvent> for WindowJoyButtonEvent {
-    fn from(value: sys::events::SDL_JoyButtonEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            which: value.which.into(),
-            button: value.button,
-            down: value.down,
-        }
-    }
-}
-
-impl From<sys::events::SDL_JoyDeviceEvent> for WindowJoyDeviceEvent {
-    fn from(value: sys::events::SDL_JoyDeviceEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            which: value.which.into(),
-        }
-    }
-}
-
-impl From<sys::events::SDL_JoyBatteryEvent> for WindowJoyBatteryEvent {
-    fn from(value: sys::events::SDL_JoyBatteryEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            which: value.which.into(),
-            state: value.state.into(),
-            percent: value.percent,
-        }
-    }
-}
-
-impl From<sys::events::SDL_GamepadAxisEvent> for WindowGamepadAxisEvent {
-    fn from(value: sys::events::SDL_GamepadAxisEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            which: value.which.into(),
-            axis: value.axis,
-            value: value.value,
-        }
-    }
-}
-
-impl From<sys::events::SDL_GamepadButtonEvent> for WindowGamepadButtonEvent {
-    fn from(value: sys::events::SDL_GamepadButtonEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            which: value.which.into(),
-            button: value.button,
-            down: value.down,
-        }
-    }
-}
-
-impl From<sys::events::SDL_GamepadDeviceEvent> for WindowGamepadDeviceEvent {
-    fn from(value: sys::events::SDL_GamepadDeviceEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            which: value.which.into(),
-        }
-    }
-}
-
-impl From<sys::events::SDL_GamepadTouchpadEvent> for WindowGamepadTouchpadEvent {
-    fn from(value: sys::events::SDL_GamepadTouchpadEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            which: value.which.into(),
-            touchpad: value.touchpad,
-            finger: value.finger,
-            x: value.x,
-            y: value.y,
-            pressure: value.pressure,
-        }
-    }
-}
-
-impl From<sys::events::SDL_GamepadSensorEvent> for WindowGamepadSensorEvent {
-    fn from(value: sys::events::SDL_GamepadSensorEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            which: value.which.into(),
-            sensor: value.sensor,
-            data: value.data,
-            sensor_timestamp: value.sensor_timestamp,
-        }
-    }
-}
-
-impl From<sys::events::SDL_AudioDeviceEvent> for WindowAudioDeviceEvent {
-    fn from(value: sys::events::SDL_AudioDeviceEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            which: value.which.into(),
-            recording: value.recording,
-        }
-    }
-}
-
-impl From<sys::events::SDL_CameraDeviceEvent> for WindowCameraDeviceEvent {
-    fn from(value: sys::events::SDL_CameraDeviceEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            which: value.which.into(),
-        }
-    }
-}
-
-impl From<sys::events::SDL_RenderEvent> for WindowRenderEvent {
-    fn from(value: sys::events::SDL_RenderEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            window_id: value.windowID.into(),
-        }
-    }
-}
-
-impl From<sys::events::SDL_TouchFingerEvent> for WindowTouchFingerEvent {
-    fn from(value: sys::events::SDL_TouchFingerEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            touch_id: value.touchID.into(),
-            finger_id: value.fingerID.into(),
-            x: value.x,
-            y: value.y,
-            dx: value.dx,
-            dy: value.dy,
-            pressure: value.pressure,
-            window_id: value.windowID.into(),
-        }
-    }
-}
-
-impl From<sys::events::SDL_PinchFingerEvent> for WindowPinchFingerEvent {
-    fn from(value: sys::events::SDL_PinchFingerEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            scale: value.scale,
-            window_id: value.windowID.into(),
-        }
-    }
-}
-
-impl From<sys::events::SDL_PenProximityEvent> for WindowPenProximityEvent {
-    fn from(value: sys::events::SDL_PenProximityEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            window_id: value.windowID.into(),
-            which: value.which.into(),
-            pen_state: value.pen_state.into(),
-            device_type: value.device_type.into(),
-        }
-    }
-}
-
-impl From<sys::events::SDL_PenMotionEvent> for WindowPenMotionEvent {
-    fn from(value: sys::events::SDL_PenMotionEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            window_id: value.windowID.into(),
-            which: value.which.into(),
-            pen_state: value.pen_state.into(),
-            x: value.x,
-            y: value.y,
-            device_type: value.device_type.into(),
-        }
-    }
-}
-
-impl From<sys::events::SDL_PenTouchEvent> for WindowPenTouchEvent {
-    fn from(value: sys::events::SDL_PenTouchEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            window_id: value.windowID.into(),
-            which: value.which.into(),
-            pen_state: value.pen_state.into(),
-            x: value.x,
-            y: value.y,
-            eraser: value.eraser,
-            down: value.down,
-            device_type: value.device_type.into(),
-        }
-    }
-}
-
-impl From<sys::events::SDL_PenButtonEvent> for WindowPenButtonEvent {
-    fn from(value: sys::events::SDL_PenButtonEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            window_id: value.windowID.into(),
-            which: value.which.into(),
-            pen_state: value.pen_state.into(),
-            x: value.x,
-            y: value.y,
-            button: value.button,
-            down: value.down,
-            device_type: value.device_type.into(),
-        }
-    }
-}
-
-impl From<sys::events::SDL_PenAxisEvent> for WindowPenAxisEvent {
-    fn from(value: sys::events::SDL_PenAxisEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            window_id: value.windowID.into(),
-            which: value.which.into(),
-            pen_state: value.pen_state.into(),
-            x: value.x,
-            y: value.y,
-            axis: value.axis.into(),
-            value: value.value,
-            device_type: value.device_type.into(),
-        }
-    }
-}
-
-impl WindowDropEvent {
-    /// # Safety
-    /// All non-null string pointers and counted arrays must be valid for reading.
-    /// Each string must be NUL-terminated and remain valid during this call.
-    pub unsafe fn from_sdl(value: &sys::events::SDL_DropEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            window_id: value.windowID.into(),
-            x: value.x,
-            y: value.y,
-            source: unsafe { copy_string(value.source) },
-            data: unsafe { copy_string(value.data) },
-        }
-    }
-}
-
-impl WindowClipboardEvent {
-    /// # Safety
-    /// All non-null string pointers and counted arrays must be valid for reading.
-    /// Each string must be NUL-terminated and remain valid during this call.
-    pub unsafe fn from_sdl(value: &sys::events::SDL_ClipboardEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            owner: value.owner,
-            num_mime_types: value.num_mime_types,
-            mime_types: unsafe { copy_strings(value.mime_types, value.num_mime_types) },
-        }
-    }
-}
-
-impl From<sys::events::SDL_SensorEvent> for WindowSensorEvent {
-    fn from(value: sys::events::SDL_SensorEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            which: value.which.into(),
-            data: value.data,
-            sensor_timestamp: value.sensor_timestamp,
-        }
-    }
-}
-
-impl From<sys::events::SDL_QuitEvent> for WindowQuitEvent {
-    fn from(value: sys::events::SDL_QuitEvent) -> Self {
-        Self {
-            event_type: value.r#type.into(),
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-        }
-    }
-}
-
-impl From<sys::events::SDL_UserEvent> for WindowUserEvent {
-    fn from(value: sys::events::SDL_UserEvent) -> Self {
-        Self {
-            event_type: value.r#type,
-            reserved: value.reserved,
-            timestamp: value.timestamp,
-            window_id: value.windowID.into(),
-            code: value.code,
-            data1: value.data1,
-            data2: value.data2,
-        }
-    }
-}
-
-impl WindowEvent {
-    /// # Safety
-    /// The tag must identify an initialized SDL event payload.
-    /// Referenced strings and counted arrays must be valid for reading during this call.
-    /// User data pointers are copied without being read or taking ownership.
-    pub unsafe fn from_sdl(value: &sys::events::SDL_Event) -> Self {
-        let event_type = sys::events::SDL_EventType(unsafe { value.r#type });
-        match event_type {
-            sys::events::SDL_EVENT_QUIT => Self::Quit(unsafe { value.quit }.into()),
-            sys::events::SDL_EVENT_TERMINATING => Self::Terminating(unsafe { value.common }.into()),
-            sys::events::SDL_EVENT_LOW_MEMORY => Self::LowMemory(unsafe { value.common }.into()),
-            sys::events::SDL_EVENT_WILL_ENTER_BACKGROUND => {
-                Self::WillEnterBackground(unsafe { value.common }.into())
-            }
-            sys::events::SDL_EVENT_DID_ENTER_BACKGROUND => {
-                Self::DidEnterBackground(unsafe { value.common }.into())
-            }
-            sys::events::SDL_EVENT_WILL_ENTER_FOREGROUND => {
-                Self::WillEnterForeground(unsafe { value.common }.into())
-            }
-            sys::events::SDL_EVENT_DID_ENTER_FOREGROUND => {
-                Self::DidEnterForeground(unsafe { value.common }.into())
-            }
-            sys::events::SDL_EVENT_LOCALE_CHANGED => {
-                Self::LocaleChanged(unsafe { value.common }.into())
-            }
-            sys::events::SDL_EVENT_SYSTEM_THEME_CHANGED => {
-                Self::SystemThemeChanged(unsafe { value.common }.into())
-            }
-            sys::events::SDL_EVENT_DISPLAY_ORIENTATION => {
-                Self::DisplayOrientation(unsafe { value.display }.into())
-            }
-            sys::events::SDL_EVENT_DISPLAY_ADDED => {
-                Self::DisplayAdded(unsafe { value.display }.into())
-            }
-            sys::events::SDL_EVENT_DISPLAY_REMOVED => {
-                Self::DisplayRemoved(unsafe { value.display }.into())
-            }
-            sys::events::SDL_EVENT_DISPLAY_MOVED => {
-                Self::DisplayMoved(unsafe { value.display }.into())
-            }
-            sys::events::SDL_EVENT_DISPLAY_DESKTOP_MODE_CHANGED => {
-                Self::DisplayDesktopModeChanged(unsafe { value.display }.into())
-            }
-            sys::events::SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED => {
-                Self::DisplayCurrentModeChanged(unsafe { value.display }.into())
-            }
-            sys::events::SDL_EVENT_DISPLAY_CONTENT_SCALE_CHANGED => {
-                Self::DisplayContentScaleChanged(unsafe { value.display }.into())
-            }
-            sys::events::SDL_EVENT_DISPLAY_USABLE_BOUNDS_CHANGED => {
-                Self::DisplayUsableBoundsChanged(unsafe { value.display }.into())
-            }
-            sys::events::SDL_EVENT_KEY_DOWN => Self::KeyDown(unsafe { value.key }.into()),
-            sys::events::SDL_EVENT_KEY_UP => Self::KeyUp(unsafe { value.key }.into()),
-            sys::events::SDL_EVENT_TEXT_EDITING => {
-                Self::TextEditing(unsafe { WindowTextEditingEvent::from_sdl(&value.edit) })
-            }
-            sys::events::SDL_EVENT_TEXT_INPUT => {
-                Self::TextInput(unsafe { WindowTextInputEvent::from_sdl(&value.text) })
-            }
-            sys::events::SDL_EVENT_KEYMAP_CHANGED => {
-                Self::KeymapChanged(unsafe { value.common }.into())
-            }
-            sys::events::SDL_EVENT_KEYBOARD_ADDED => {
-                Self::KeyboardAdded(unsafe { value.kdevice }.into())
-            }
-            sys::events::SDL_EVENT_KEYBOARD_REMOVED => {
-                Self::KeyboardRemoved(unsafe { value.kdevice }.into())
-            }
-            sys::events::SDL_EVENT_TEXT_EDITING_CANDIDATES => Self::TextEditingCandidates(unsafe {
-                WindowTextEditingCandidatesEvent::from_sdl(&value.edit_candidates)
-            }),
-            sys::events::SDL_EVENT_SCREEN_KEYBOARD_SHOWN => {
-                Self::ScreenKeyboardShown(unsafe { value.common }.into())
-            }
-            sys::events::SDL_EVENT_SCREEN_KEYBOARD_HIDDEN => {
-                Self::ScreenKeyboardHidden(unsafe { value.common }.into())
-            }
-            sys::events::SDL_EVENT_MOUSE_MOTION => {
-                Self::MouseMotion(unsafe { value.motion }.into())
-            }
-            sys::events::SDL_EVENT_MOUSE_BUTTON_DOWN => {
-                Self::MouseButtonDown(unsafe { value.button }.into())
-            }
-            sys::events::SDL_EVENT_MOUSE_BUTTON_UP => {
-                Self::MouseButtonUp(unsafe { value.button }.into())
-            }
-            sys::events::SDL_EVENT_MOUSE_WHEEL => Self::MouseWheel(unsafe { value.wheel }.into()),
-            sys::events::SDL_EVENT_MOUSE_ADDED => Self::MouseAdded(unsafe { value.mdevice }.into()),
-            sys::events::SDL_EVENT_MOUSE_REMOVED => {
-                Self::MouseRemoved(unsafe { value.mdevice }.into())
-            }
-            sys::events::SDL_EVENT_JOYSTICK_AXIS_MOTION => {
-                Self::JoystickAxisMotion(unsafe { value.jaxis }.into())
-            }
-            sys::events::SDL_EVENT_JOYSTICK_BALL_MOTION => {
-                Self::JoystickBallMotion(unsafe { value.jball }.into())
-            }
-            sys::events::SDL_EVENT_JOYSTICK_HAT_MOTION => {
-                Self::JoystickHatMotion(unsafe { value.jhat }.into())
-            }
-            sys::events::SDL_EVENT_JOYSTICK_BUTTON_DOWN => {
-                Self::JoystickButtonDown(unsafe { value.jbutton }.into())
-            }
-            sys::events::SDL_EVENT_JOYSTICK_BUTTON_UP => {
-                Self::JoystickButtonUp(unsafe { value.jbutton }.into())
-            }
-            sys::events::SDL_EVENT_JOYSTICK_ADDED => {
-                Self::JoystickAdded(unsafe { value.jdevice }.into())
-            }
-            sys::events::SDL_EVENT_JOYSTICK_REMOVED => {
-                Self::JoystickRemoved(unsafe { value.jdevice }.into())
-            }
-            sys::events::SDL_EVENT_JOYSTICK_BATTERY_UPDATED => {
-                Self::JoystickBatteryUpdated(unsafe { value.jbattery }.into())
-            }
-            sys::events::SDL_EVENT_JOYSTICK_UPDATE_COMPLETE => {
-                Self::JoystickUpdateComplete(unsafe { value.jdevice }.into())
-            }
-            sys::events::SDL_EVENT_GAMEPAD_AXIS_MOTION => {
-                Self::GamepadAxisMotion(unsafe { value.gaxis }.into())
-            }
-            sys::events::SDL_EVENT_GAMEPAD_BUTTON_DOWN => {
-                Self::GamepadButtonDown(unsafe { value.gbutton }.into())
-            }
-            sys::events::SDL_EVENT_GAMEPAD_BUTTON_UP => {
-                Self::GamepadButtonUp(unsafe { value.gbutton }.into())
-            }
-            sys::events::SDL_EVENT_GAMEPAD_ADDED => {
-                Self::GamepadAdded(unsafe { value.gdevice }.into())
-            }
-            sys::events::SDL_EVENT_GAMEPAD_REMOVED => {
-                Self::GamepadRemoved(unsafe { value.gdevice }.into())
-            }
-            sys::events::SDL_EVENT_GAMEPAD_REMAPPED => {
-                Self::GamepadRemapped(unsafe { value.gdevice }.into())
-            }
-            sys::events::SDL_EVENT_GAMEPAD_TOUCHPAD_DOWN => {
-                Self::GamepadTouchpadDown(unsafe { value.gtouchpad }.into())
-            }
-            sys::events::SDL_EVENT_GAMEPAD_TOUCHPAD_MOTION => {
-                Self::GamepadTouchpadMotion(unsafe { value.gtouchpad }.into())
-            }
-            sys::events::SDL_EVENT_GAMEPAD_TOUCHPAD_UP => {
-                Self::GamepadTouchpadUp(unsafe { value.gtouchpad }.into())
-            }
-            sys::events::SDL_EVENT_GAMEPAD_SENSOR_UPDATE => {
-                Self::GamepadSensorUpdate(unsafe { value.gsensor }.into())
-            }
-            sys::events::SDL_EVENT_GAMEPAD_UPDATE_COMPLETE => {
-                Self::GamepadUpdateComplete(unsafe { value.gdevice }.into())
-            }
-            sys::events::SDL_EVENT_GAMEPAD_STEAM_HANDLE_UPDATED => {
-                Self::GamepadSteamHandleUpdated(unsafe { value.gdevice }.into())
-            }
-            sys::events::SDL_EVENT_FINGER_DOWN => Self::FingerDown(unsafe { value.tfinger }.into()),
-            sys::events::SDL_EVENT_FINGER_UP => Self::FingerUp(unsafe { value.tfinger }.into()),
-            sys::events::SDL_EVENT_FINGER_MOTION => {
-                Self::FingerMotion(unsafe { value.tfinger }.into())
-            }
-            sys::events::SDL_EVENT_FINGER_CANCELED => {
-                Self::FingerCanceled(unsafe { value.tfinger }.into())
-            }
-            sys::events::SDL_EVENT_PINCH_BEGIN => Self::PinchBegin(unsafe { value.pinch }.into()),
-            sys::events::SDL_EVENT_PINCH_UPDATE => Self::PinchUpdate(unsafe { value.pinch }.into()),
-            sys::events::SDL_EVENT_PINCH_END => Self::PinchEnd(unsafe { value.pinch }.into()),
-            sys::events::SDL_EVENT_CLIPBOARD_UPDATE => {
-                Self::ClipboardUpdate(unsafe { WindowClipboardEvent::from_sdl(&value.clipboard) })
-            }
-            sys::events::SDL_EVENT_DROP_FILE => {
-                Self::DropFile(unsafe { WindowDropEvent::from_sdl(&value.drop) })
-            }
-            sys::events::SDL_EVENT_DROP_TEXT => {
-                Self::DropText(unsafe { WindowDropEvent::from_sdl(&value.drop) })
-            }
-            sys::events::SDL_EVENT_DROP_BEGIN => {
-                Self::DropBegin(unsafe { WindowDropEvent::from_sdl(&value.drop) })
-            }
-            sys::events::SDL_EVENT_DROP_COMPLETE => {
-                Self::DropComplete(unsafe { WindowDropEvent::from_sdl(&value.drop) })
-            }
-            sys::events::SDL_EVENT_DROP_POSITION => {
-                Self::DropPosition(unsafe { WindowDropEvent::from_sdl(&value.drop) })
-            }
-            sys::events::SDL_EVENT_AUDIO_DEVICE_ADDED => {
-                Self::AudioDeviceAdded(unsafe { value.adevice }.into())
-            }
-            sys::events::SDL_EVENT_AUDIO_DEVICE_REMOVED => {
-                Self::AudioDeviceRemoved(unsafe { value.adevice }.into())
-            }
-            sys::events::SDL_EVENT_AUDIO_DEVICE_FORMAT_CHANGED => {
-                Self::AudioDeviceFormatChanged(unsafe { value.adevice }.into())
-            }
-            sys::events::SDL_EVENT_SENSOR_UPDATE => {
-                Self::SensorUpdate(unsafe { value.sensor }.into())
-            }
-            sys::events::SDL_EVENT_PEN_PROXIMITY_IN => {
-                Self::PenProximityIn(unsafe { value.pproximity }.into())
-            }
-            sys::events::SDL_EVENT_PEN_PROXIMITY_OUT => {
-                Self::PenProximityOut(unsafe { value.pproximity }.into())
-            }
-            sys::events::SDL_EVENT_PEN_DOWN => Self::PenDown(unsafe { value.ptouch }.into()),
-            sys::events::SDL_EVENT_PEN_UP => Self::PenUp(unsafe { value.ptouch }.into()),
-            sys::events::SDL_EVENT_PEN_BUTTON_DOWN => {
-                Self::PenButtonDown(unsafe { value.pbutton }.into())
-            }
-            sys::events::SDL_EVENT_PEN_BUTTON_UP => {
-                Self::PenButtonUp(unsafe { value.pbutton }.into())
-            }
-            sys::events::SDL_EVENT_PEN_MOTION => Self::PenMotion(unsafe { value.pmotion }.into()),
-            sys::events::SDL_EVENT_PEN_AXIS => Self::PenAxis(unsafe { value.paxis }.into()),
-            sys::events::SDL_EVENT_CAMERA_DEVICE_ADDED => {
-                Self::CameraDeviceAdded(unsafe { value.cdevice }.into())
-            }
-            sys::events::SDL_EVENT_CAMERA_DEVICE_REMOVED => {
-                Self::CameraDeviceRemoved(unsafe { value.cdevice }.into())
-            }
-            sys::events::SDL_EVENT_CAMERA_DEVICE_APPROVED => {
-                Self::CameraDeviceApproved(unsafe { value.cdevice }.into())
-            }
-            sys::events::SDL_EVENT_CAMERA_DEVICE_DENIED => {
-                Self::CameraDeviceDenied(unsafe { value.cdevice }.into())
-            }
-            sys::events::SDL_EVENT_RENDER_TARGETS_RESET => {
-                Self::RenderTargetsReset(unsafe { value.render }.into())
-            }
-            sys::events::SDL_EVENT_RENDER_DEVICE_RESET => {
-                Self::RenderDeviceReset(unsafe { value.render }.into())
-            }
-            sys::events::SDL_EVENT_RENDER_DEVICE_LOST => {
-                Self::RenderDeviceLost(unsafe { value.render }.into())
-            }
-            sys::events::SDL_EVENT_PRIVATE0 => Self::Private0(unsafe { value.common }.into()),
-            sys::events::SDL_EVENT_PRIVATE1 => Self::Private1(unsafe { value.common }.into()),
-            sys::events::SDL_EVENT_PRIVATE2 => Self::Private2(unsafe { value.common }.into()),
-            sys::events::SDL_EVENT_PRIVATE3 => Self::Private3(unsafe { value.common }.into()),
-            sys::events::SDL_EVENT_POLL_SENTINEL => {
-                Self::PollSentinel(unsafe { value.common }.into())
-            }
-            sys::events::SDL_EVENT_WINDOW_SHOWN => {
-                let window = unsafe { value.window };
-                Self::WindowShown {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_HIDDEN => {
-                let window = unsafe { value.window };
-                Self::WindowHidden {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_EXPOSED => {
-                let window = unsafe { value.window };
-                Self::WindowExposed {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                    live_resize: window.data1 != 0,
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_MOVED => {
-                let window = unsafe { value.window };
-                Self::WindowMoved {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                    x: window.data1,
-                    y: window.data2,
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_RESIZED => {
-                let window = unsafe { value.window };
-                Self::WindowResized {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                    width: window.data1,
-                    height: window.data2,
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED => {
-                let window = unsafe { value.window };
-                Self::WindowPixelSizeChanged {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                    width: window.data1,
-                    height: window.data2,
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_METAL_VIEW_RESIZED => {
-                let window = unsafe { value.window };
-                Self::WindowMetalViewResized {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_MINIMIZED => {
-                let window = unsafe { value.window };
-                Self::WindowMinimized {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_MAXIMIZED => {
-                let window = unsafe { value.window };
-                Self::WindowMaximized {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_RESTORED => {
-                let window = unsafe { value.window };
-                Self::WindowRestored {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_MOUSE_ENTER => {
-                let window = unsafe { value.window };
-                Self::WindowMouseEnter {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_MOUSE_LEAVE => {
-                let window = unsafe { value.window };
-                Self::WindowMouseLeave {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_FOCUS_GAINED => {
-                let window = unsafe { value.window };
-                Self::WindowFocusGained {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_FOCUS_LOST => {
-                let window = unsafe { value.window };
-                Self::WindowFocusLost {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_CLOSE_REQUESTED => {
-                let window = unsafe { value.window };
-                Self::WindowCloseRequested {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_HIT_TEST => {
-                let window = unsafe { value.window };
-                Self::WindowHitTest {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                    data1: window.data1,
-                    data2: window.data2,
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_ICCPROF_CHANGED => {
-                let window = unsafe { value.window };
-                Self::WindowICCProfChanged {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_DISPLAY_CHANGED => {
-                let window = unsafe { value.window };
-                Self::WindowDisplayChanged {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                    display_id: WindowDisplayId(window.data1 as u32),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED => {
-                let window = unsafe { value.window };
-                Self::WindowDisplayScaleChanged {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_SAFE_AREA_CHANGED => {
-                let window = unsafe { value.window };
-                Self::WindowSafeAreaChanged {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_OCCLUDED => {
-                let window = unsafe { value.window };
-                Self::WindowOccluded {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_ENTER_FULLSCREEN => {
-                let window = unsafe { value.window };
-                Self::WindowEnterFullscreen {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_LEAVE_FULLSCREEN => {
-                let window = unsafe { value.window };
-                Self::WindowLeaveFullscreen {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_DESTROYED => {
-                let window = unsafe { value.window };
-                Self::WindowDestroyed {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            sys::events::SDL_EVENT_WINDOW_HDR_STATE_CHANGED => {
-                let window = unsafe { value.window };
-                Self::WindowHdrStateChanged {
-                    timestamp: window.timestamp,
-                    window_id: window.windowID.into(),
-                }
-            }
-            event_type
-                if (sys::events::SDL_EVENT_USER.0..=sys::events::SDL_EVENT_LAST.0)
-                    .contains(&event_type.0) =>
-            {
-                Self::User(unsafe { value.user }.into())
-            }
-            _ => Self::Unknown(unsafe { value.common }.into()),
-        }
-    }
-}
-
 unsafe fn copy_string(value: *const c_char) -> Option<String> {
     if value.is_null() {
         None
@@ -2116,23 +970,6 @@ unsafe fn copy_string(value: *const c_char) -> Option<String> {
                 .into_owned(),
         )
     }
-}
-
-unsafe fn copy_strings(values: *const *const c_char, count: i32) -> Vec<String> {
-    if count <= 0 {
-        return Vec::new();
-    }
-    unsafe { std::slice::from_raw_parts(values, count as usize) }
-        .iter()
-        .map(|value| unsafe { copy_string(*value) }.unwrap_or_default())
-        .collect()
-}
-
-#[cfg(feature = "wgpu")]
-pub struct SdlWgpuWindow {
-    frame: RefCell<Option<FrameResources>>,
-    gpu: WgpuContext,
-    native: SdlWindow,
 }
 
 #[cfg(feature = "wgpu")]
@@ -2161,70 +998,53 @@ struct WgpuContext {
 
 #[cfg(feature = "wgpu")]
 impl SdlInstance {
-    pub fn create_wgpu_window(
+    pub fn create_wgpu_window<H: WindowHandler<SdlWgpuWindow>>(
         &self,
-        title: &str,
-        width: i32,
-        height: i32,
-        flags: WindowFlags,
-    ) -> Result<SdlWgpuWindow, WindowError> {
+        handler: H,
+        options: WindowOptions<'_>,
+    ) -> Result<SdlWindowWithHandler<SdlWgpuWindow, H>, WindowError> {
         #[cfg(any(target_os = "macos", target_os = "ios"))]
-        let flags = flags | WindowFlags::METAL;
+        let options = WindowOptions {
+            flags: options.flags | WindowFlags::METAL,
+            ..options
+        };
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "ios")))]
-        let flags = flags | WindowFlags::VULKAN;
-        let window = self.create_window(title, width, height, flags)?;
-        SdlWgpuWindow::new(window)
+        let options = WindowOptions {
+            flags: options.flags | WindowFlags::VULKAN,
+            ..options
+        };
+        let mut window = self.create_native_window::<true>(options)?;
+        window.gpu = Some(WgpuContext::new(&window)?);
+        SdlWindowWithHandler::new(window, handler)
     }
 }
 
 #[cfg(feature = "wgpu")]
-impl SdlWgpuWindow {
-    pub fn window_handle_provider(&self) -> Rc<dyn raw_window_handle::HasWindowHandle> {
-        self.native.window_handle_provider()
-    }
-
-    pub fn init(&mut self, handler: &mut impl WindowHandler<Self>) -> Result<(), WindowError> {
-        let result = handler.init(self);
-        result.or_else(|error| handler.error(error))
-    }
-
-    pub fn update(&mut self, handler: &mut impl WindowHandler<Self>) -> Result<(), WindowError> {
-        let result = handler.update(self);
-        result.or_else(|error| handler.error(error))
-    }
-
-    pub fn window_event(
-        &mut self,
-        event: &WindowEvent,
-        handler: &mut impl WindowHandler<Self>,
-    ) -> Result<(), WindowError> {
+impl<H: WindowHandler<SdlWgpuWindow>> SdlWindowWithHandler<SdlWgpuWindow, H> {
+    pub fn window_event(&mut self, event: &WindowEvent) -> Result<(), WindowError> {
+        let Self { handler, window } = self;
         let result = (|| {
-            if let WindowEvent::WindowPixelSizeChanged {
-                window_id,
-                width,
-                height,
-                ..
-            } = event
-            {
-                if *window_id != self.get_id()? {
+            if let WindowEventKind::WindowPixelSizeChanged { width, height } = &event.kind {
+                if event.window_id != window.get_id()? {
                     return Ok(());
                 }
                 let width =
                     u32::try_from(*width).map_err(|error| WindowError::Nul(error.to_string()))?;
                 let height =
                     u32::try_from(*height).map_err(|error| WindowError::Nul(error.to_string()))?;
-                self.resize_surface(width, height)?;
+                window.resize_surface(width, height)?;
             }
-            handler.window_event(self, event)
+            handler.window_event(window, event)
         })();
         result.or_else(|error| handler.error(error))
     }
 
-    pub fn render(&mut self, handler: &mut impl WindowHandler<Self>) -> Result<bool, WindowError> {
-        if self.gpu.suspended {
+    pub fn render(&mut self) -> Result<bool, WindowError> {
+        let Self { handler, window } = self;
+        if window.gpu().suspended {
             return Ok(false);
         }
-        if self
+        if window
             .frame
             .try_borrow()
             .map_err(|error| WindowError::Nul(error.to_string()))?
@@ -2232,7 +1052,7 @@ impl SdlWgpuWindow {
         {
             return Err(WindowError::Nul("a wgpu frame is already active".into()));
         }
-        let frame = match self.acquire_frame() {
+        let frame = match window.acquire_frame() {
             Ok(Some(frame)) => frame,
             Ok(None) => return Ok(false),
             Err(error) => {
@@ -2240,9 +1060,9 @@ impl SdlWgpuWindow {
                 return Ok(false);
             }
         };
-        *self.frame.borrow_mut() = Some(frame);
-        let result = catch_unwind(AssertUnwindSafe(|| handler.render(self)));
-        let frame = self
+        *window.frame.borrow_mut() = Some(frame);
+        let result = catch_unwind(AssertUnwindSafe(|| handler.render(window)));
+        let frame = window
             .frame
             .try_borrow_mut()
             .map_err(|error| WindowError::Nul(error.to_string()))
@@ -2262,23 +1082,26 @@ impl SdlWgpuWindow {
             handler.error(error)?;
             return Ok(false);
         }
-        self.gpu.queue.submit([frame.command_encoder.finish()]);
-        self.gpu.queue.present(frame.surface_texture);
-        let result = handler.frame_ready(self);
-        result.or_else(|error| handler.error(error))?;
+        window.gpu().queue.submit([frame.command_encoder.finish()]);
+        window.gpu().queue.present(frame.surface_texture);
+        handler
+            .frame_ready(window)
+            .or_else(|error| handler.error(error))?;
         Ok(true)
     }
 }
 
 #[cfg(feature = "wgpu")]
-impl SdlWgpuWindow {
-    fn new(native: SdlWindow) -> Result<Self, WindowError> {
-        if native.has_surface() || native.get_flags().is_opengl() {
+impl WgpuContext {
+    fn new(window: &SdlWgpuWindow) -> Result<Self, WindowError> {
+        if unsafe { sys::video::SDL_WindowHasSurface(window.owner.raw.as_ptr()) }
+            || window.get_flags().is_opengl()
+        {
             return Err(WindowError::Nul(
                 "wgpu windows cannot use an SDL software surface or OpenGL context".into(),
             ));
         }
-        let (width, height) = native.get_size_in_pixels()?;
+        let (width, height) = window.get_size_in_pixels()?;
         let width = u32::try_from(width).map_err(|error| WindowError::Nul(error.to_string()))?;
         let height = u32::try_from(height).map_err(|error| WindowError::Nul(error.to_string()))?;
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -2290,8 +1113,8 @@ impl SdlWgpuWindow {
             flags: wgpu::InstanceFlags::empty().with_env(),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
-        let raw_display_handle = native.display_handle()?.as_raw();
-        let raw_window_handle = native.window_handle()?.as_raw();
+        let raw_display_handle = window.display_handle()?.as_raw();
+        let raw_window_handle = window.window_handle()?.as_raw();
         let surface = unsafe {
             instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
                 raw_display_handle: Some(raw_display_handle),
@@ -2341,37 +1164,48 @@ impl SdlWgpuWindow {
             surface.configure(&device, &surface_config);
         }
         Ok(Self {
-            frame: RefCell::new(None),
-            gpu: WgpuContext {
-                surface,
-                adapter,
-                device,
-                queue,
-                surface_config,
-                clear_color: wgpu::Color {
-                    r: 17.0 / 255.0,
-                    g: 24.0 / 255.0,
-                    b: 39.0 / 255.0,
-                    a: 1.0,
-                },
-                suspended,
-                instance,
+            surface,
+            adapter,
+            device,
+            queue,
+            surface_config,
+            clear_color: wgpu::Color {
+                r: 17.0 / 255.0,
+                g: 24.0 / 255.0,
+                b: 39.0 / 255.0,
+                a: 1.0,
             },
-            native,
+            suspended,
+            instance,
         })
+    }
+}
+
+#[cfg(feature = "wgpu")]
+impl SdlWindow<true> {
+    fn gpu(&self) -> &WgpuContext {
+        self.gpu
+            .as_ref()
+            .expect("GPU windows are created with a GPU context")
+    }
+
+    fn gpu_mut(&mut self) -> &mut WgpuContext {
+        self.gpu
+            .as_mut()
+            .expect("GPU windows are created with a GPU context")
     }
 
     fn acquire_frame(&self) -> Result<Option<FrameResources>, WindowError> {
-        let surface_texture = match self.gpu.surface.get_current_texture() {
+        let surface_texture = match self.gpu().surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
                 return Ok(None);
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
-                self.gpu
+                self.gpu()
                     .surface
-                    .configure(&self.gpu.device, &self.gpu.surface_config);
+                    .configure(&self.gpu().device, &self.gpu().surface_config);
                 return Ok(None);
             }
             wgpu::CurrentSurfaceTexture::Lost => {
@@ -2385,7 +1219,7 @@ impl SdlWgpuWindow {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let mut clear = self
-            .gpu
+            .gpu()
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("cxstd window clear encoder"),
@@ -2398,16 +1232,16 @@ impl SdlWgpuWindow {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.gpu.clear_color),
+                        load: wgpu::LoadOp::Clear(self.gpu().clear_color),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 ..Default::default()
             });
         }
-        self.gpu.queue.submit([clear.finish()]);
+        self.gpu().queue.submit([clear.finish()]);
         let command_encoder =
-            self.gpu
+            self.gpu()
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("cxstd window frame encoder"),
@@ -2417,10 +1251,6 @@ impl SdlWgpuWindow {
             command_encoder,
             surface_texture,
         }))
-    }
-
-    fn software_surface_error() -> WindowError {
-        WindowError::Nul("SDL software surfaces are not available on a wgpu window".into())
     }
 }
 
@@ -2436,35 +1266,35 @@ impl WgpuFrame for SdlWgpuFrame<'_> {
 }
 
 #[cfg(feature = "wgpu")]
-impl WgpuWindow for SdlWgpuWindow {
+impl WgpuWindow for SdlWindow<true> {
     type Frame<'a> = SdlWgpuFrame<'a>;
 
     fn instance(&self) -> &wgpu::Instance {
-        &self.gpu.instance
+        &self.gpu().instance
     }
 
     fn adapter(&self) -> &wgpu::Adapter {
-        &self.gpu.adapter
+        &self.gpu().adapter
     }
 
     fn device(&self) -> &wgpu::Device {
-        &self.gpu.device
+        &self.gpu().device
     }
 
     fn queue(&self) -> &wgpu::Queue {
-        &self.gpu.queue
+        &self.gpu().queue
     }
 
     fn surface_config(&self) -> &wgpu::SurfaceConfiguration {
-        &self.gpu.surface_config
+        &self.gpu().surface_config
     }
 
     fn clear_color(&self) -> wgpu::Color {
-        self.gpu.clear_color
+        self.gpu().clear_color
     }
 
     fn set_clear_color(&mut self, color: wgpu::Color) {
-        self.gpu.clear_color = color;
+        self.gpu_mut().clear_color = color;
     }
 
     fn resize_surface(&mut self, width: u32, height: u32) -> Result<(), WindowError> {
@@ -2479,21 +1309,21 @@ impl WgpuWindow for SdlWgpuWindow {
             ));
         }
         if width == 0 || height == 0 {
-            self.gpu.suspended = true;
+            self.gpu_mut().suspended = true;
             return Ok(());
         }
-        let limit = self.gpu.device.limits().max_texture_dimension_2d;
+        let limit = self.gpu().device.limits().max_texture_dimension_2d;
         if width > limit || height > limit {
             return Err(WindowError::Nul(
                 "window size exceeds the wgpu device limits".into(),
             ));
         }
-        self.gpu.surface_config.width = width;
-        self.gpu.surface_config.height = height;
-        self.gpu
+        self.gpu_mut().surface_config.width = width;
+        self.gpu_mut().surface_config.height = height;
+        self.gpu()
             .surface
-            .configure(&self.gpu.device, &self.gpu.surface_config);
-        self.gpu.suspended = false;
+            .configure(&self.gpu().device, &self.gpu().surface_config);
+        self.gpu_mut().suspended = false;
         Ok(())
     }
 
@@ -2508,306 +1338,1481 @@ impl WgpuWindow for SdlWgpuWindow {
     }
 }
 
-#[cfg(feature = "wgpu")]
-impl Window for SdlWgpuWindow {
-    fn get_id(&self) -> Result<WindowId, WindowError> {
-        self.native.get_id()
-    }
-
-    fn get_display(&self) -> Result<WindowDisplayId, WindowError> {
-        self.native.get_display()
-    }
-
-    fn get_pixel_density(&self) -> Result<f32, WindowError> {
-        self.native.get_pixel_density()
-    }
-
-    fn get_display_scale(&self) -> Result<f32, WindowError> {
-        self.native.get_display_scale()
-    }
-
-    fn set_fullscreen_mode(&mut self, mode: Option<&WindowDisplayMode>) -> Result<(), WindowError> {
-        self.native.set_fullscreen_mode(mode)
-    }
-
-    fn get_fullscreen_mode(&self) -> Option<WindowDisplayMode> {
-        self.native.get_fullscreen_mode()
-    }
-
-    fn get_icc_profile(&self) -> Result<Vec<u8>, WindowError> {
-        self.native.get_icc_profile()
-    }
-
-    fn get_pixel_format(&self) -> Result<WindowPixelFormat, WindowError> {
-        self.native.get_pixel_format()
-    }
-
-    fn get_properties(&self) -> Result<WindowPropertiesId, WindowError> {
-        self.native.get_properties()
-    }
-
-    fn get_flags(&self) -> WindowFlags {
-        self.native.get_flags()
-    }
-
-    fn set_cursor(&mut self, cursor: WindowSystemCursor) -> Result<(), WindowError> {
-        self.native.set_cursor(cursor)
-    }
-
-    fn start_text_input(&mut self) -> Result<(), WindowError> {
-        self.native.start_text_input()
-    }
-
-    fn stop_text_input(&mut self) -> Result<(), WindowError> {
-        self.native.stop_text_input()
-    }
-
-    fn set_title(&mut self, title: &str) -> Result<(), WindowError> {
-        self.native.set_title(title)
-    }
-
-    fn get_title(&self) -> String {
-        self.native.get_title()
-    }
-
-    fn set_icon(&mut self, icon: &WindowSurfaceRef<'_>) -> Result<(), WindowError> {
-        self.native.set_icon(icon)
-    }
-
-    fn set_position(&mut self, x: i32, y: i32) -> Result<(), WindowError> {
-        self.native.set_position(x, y)
-    }
-
-    fn get_position(&self) -> Result<(i32, i32), WindowError> {
-        self.native.get_position()
-    }
-
-    fn set_size(&mut self, width: i32, height: i32) -> Result<(), WindowError> {
-        self.native.set_size(width, height)
-    }
-
-    fn get_size(&self) -> Result<(i32, i32), WindowError> {
-        self.native.get_size()
-    }
-
-    fn get_safe_area(&self) -> Result<WindowRect, WindowError> {
-        self.native.get_safe_area()
-    }
-
-    fn set_aspect_ratio(&mut self, min_aspect: f32, max_aspect: f32) -> Result<(), WindowError> {
-        self.native.set_aspect_ratio(min_aspect, max_aspect)
-    }
-
-    fn get_aspect_ratio(&self) -> Result<(f32, f32), WindowError> {
-        self.native.get_aspect_ratio()
-    }
-
-    fn get_borders_size(&self) -> Result<(i32, i32, i32, i32), WindowError> {
-        self.native.get_borders_size()
-    }
-
-    fn get_size_in_pixels(&self) -> Result<(i32, i32), WindowError> {
-        self.native.get_size_in_pixels()
-    }
-
-    fn set_minimum_size(&mut self, width: i32, height: i32) -> Result<(), WindowError> {
-        self.native.set_minimum_size(width, height)
-    }
-
-    fn get_minimum_size(&self) -> Result<(i32, i32), WindowError> {
-        self.native.get_minimum_size()
-    }
-
-    fn set_maximum_size(&mut self, width: i32, height: i32) -> Result<(), WindowError> {
-        self.native.set_maximum_size(width, height)
-    }
-
-    fn get_maximum_size(&self) -> Result<(i32, i32), WindowError> {
-        self.native.get_maximum_size()
-    }
-
-    fn set_bordered(&mut self, bordered: bool) -> Result<(), WindowError> {
-        self.native.set_bordered(bordered)
-    }
+mod conversions {
+    use super::*;
 
-    fn set_resizable(&mut self, resizable: bool) -> Result<(), WindowError> {
-        self.native.set_resizable(resizable)
+    impl From<sys::video::SDL_WindowID> for WindowId {
+        fn from(value: sys::video::SDL_WindowID) -> Self {
+            Self(value.0)
+        }
     }
 
-    fn set_always_on_top(&mut self, on_top: bool) -> Result<(), WindowError> {
-        self.native.set_always_on_top(on_top)
+    impl From<WindowId> for sys::video::SDL_WindowID {
+        fn from(value: WindowId) -> Self {
+            Self(value.0)
+        }
     }
 
-    fn set_fill_document(&mut self, fill: bool) -> Result<(), WindowError> {
-        self.native.set_fill_document(fill)
+    impl From<sys::video::SDL_DisplayID> for WindowDisplayId {
+        fn from(value: sys::video::SDL_DisplayID) -> Self {
+            Self(value.0)
+        }
     }
 
-    fn show(&mut self) -> Result<(), WindowError> {
-        self.native.show()
+    impl From<WindowDisplayId> for sys::video::SDL_DisplayID {
+        fn from(value: WindowDisplayId) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::properties::SDL_PropertiesID> for WindowPropertiesId {
+        fn from(value: sys::properties::SDL_PropertiesID) -> Self {
+            Self(value.0)
+        }
     }
 
-    fn hide(&mut self) -> Result<(), WindowError> {
-        self.native.hide()
+    impl From<WindowPropertiesId> for sys::properties::SDL_PropertiesID {
+        fn from(value: WindowPropertiesId) -> Self {
+            Self(value.0)
+        }
     }
 
-    fn raise(&mut self) -> Result<(), WindowError> {
-        self.native.raise()
+    impl From<sys::pixels::SDL_PixelFormat> for WindowPixelFormat {
+        fn from(value: sys::pixels::SDL_PixelFormat) -> Self {
+            Self(value.0)
+        }
     }
 
-    fn maximize(&mut self) -> Result<(), WindowError> {
-        self.native.maximize()
-    }
-
-    fn minimize(&mut self) -> Result<(), WindowError> {
-        self.native.minimize()
-    }
-
-    fn restore(&mut self) -> Result<(), WindowError> {
-        self.native.restore()
-    }
-
-    fn set_fullscreen(&mut self, fullscreen: bool) -> Result<(), WindowError> {
-        self.native.set_fullscreen(fullscreen)
-    }
-
-    fn sync(&self) -> Result<(), WindowError> {
-        self.native.sync()
-    }
-
-    fn has_surface(&self) -> bool {
-        false
-    }
-
-    fn get_surface(&mut self) -> Result<WindowSurfaceRef<'_>, WindowError> {
-        Err(Self::software_surface_error())
-    }
-
-    fn set_surface_vsync(&mut self, _vsync: i32) -> Result<(), WindowError> {
-        Err(Self::software_surface_error())
-    }
-
-    fn get_surface_vsync(&self) -> Result<i32, WindowError> {
-        Err(Self::software_surface_error())
-    }
-
-    fn update_surface(&mut self) -> Result<(), WindowError> {
-        Err(Self::software_surface_error())
-    }
-
-    fn update_surface_rects(&mut self, _rects: &[WindowRect]) -> Result<(), WindowError> {
-        Err(Self::software_surface_error())
-    }
-
-    fn destroy_surface(&mut self) -> Result<(), WindowError> {
-        Err(Self::software_surface_error())
-    }
-
-    fn set_keyboard_grab(&mut self, grabbed: bool) -> Result<(), WindowError> {
-        self.native.set_keyboard_grab(grabbed)
-    }
-
-    fn set_mouse_grab(&mut self, grabbed: bool) -> Result<(), WindowError> {
-        self.native.set_mouse_grab(grabbed)
-    }
-
-    fn get_keyboard_grab(&self) -> bool {
-        self.native.get_keyboard_grab()
-    }
-
-    fn get_mouse_grab(&self) -> bool {
-        self.native.get_mouse_grab()
-    }
-
-    fn set_mouse_rect(&mut self, rect: Option<&WindowRect>) -> Result<(), WindowError> {
-        self.native.set_mouse_rect(rect)
-    }
-
-    fn get_mouse_rect(&self) -> Option<WindowRect> {
-        self.native.get_mouse_rect()
-    }
-
-    fn set_opacity(&mut self, opacity: f32) -> Result<(), WindowError> {
-        self.native.set_opacity(opacity)
-    }
-
-    fn get_opacity(&self) -> Result<f32, WindowError> {
-        self.native.get_opacity()
-    }
-
-    fn set_focusable(&mut self, focusable: bool) -> Result<(), WindowError> {
-        self.native.set_focusable(focusable)
-    }
-
-    fn show_system_menu(&mut self, x: i32, y: i32) -> Result<(), WindowError> {
-        self.native.show_system_menu(x, y)
-    }
-
-    fn set_hit_test(
-        &mut self,
-        hit_test: impl Fn(i32, i32) -> WindowHitTestResult + 'static,
-    ) -> Result<(), WindowError>
-    where
-        Self: Sized,
-    {
-        self.native.set_hit_test(hit_test)
-    }
-
-    fn set_shape(&mut self, shape: Option<&WindowSurfaceRef<'_>>) -> Result<(), WindowError> {
-        self.native.set_shape(shape)
-    }
-
-    fn flash(&mut self, operation: WindowFlashOperation) -> Result<(), WindowError> {
-        self.native.flash(operation)
-    }
-
-    fn set_progress_state(&mut self, state: WindowProgressState) -> Result<(), WindowError> {
-        self.native.set_progress_state(state)
-    }
-
-    fn get_progress_state(&self) -> Result<WindowProgressState, WindowError> {
-        self.native.get_progress_state()
-    }
-
-    fn set_progress_value(&mut self, value: f32) -> Result<(), WindowError> {
-        self.native.set_progress_value(value)
-    }
-
-    fn get_progress_value(&self) -> Result<f32, WindowError> {
-        self.native.get_progress_value()
-    }
-
-    fn display_handle(&self) -> Result<WindowDisplayHandle<'_>, WindowError> {
-        self.native.display_handle()
-    }
+    impl From<WindowPixelFormat> for sys::pixels::SDL_PixelFormat {
+        fn from(value: WindowPixelFormat) -> Self {
+            Self(value.0)
+        }
+    }
 
-    fn window_handle(&self) -> Result<WindowHandle<'_>, WindowError> {
-        self.native.window_handle()
+    impl From<u32> for WindowId {
+        fn from(value: u32) -> Self {
+            Self(value)
+        }
     }
-}
 
-impl From<WindowSystemCursor> for sys::mouse::SDL_SystemCursor {
-    fn from(value: WindowSystemCursor) -> Self {
-        Self(match value {
-            WindowSystemCursor::Default => 0,
-            WindowSystemCursor::Text => 1,
-            WindowSystemCursor::Wait => 2,
-            WindowSystemCursor::Crosshair => 3,
-            WindowSystemCursor::Progress => 4,
-            WindowSystemCursor::NwseResize => 5,
-            WindowSystemCursor::NeswResize => 6,
-            WindowSystemCursor::EwResize => 7,
-            WindowSystemCursor::NsResize => 8,
-            WindowSystemCursor::Move => 9,
-            WindowSystemCursor::NotAllowed => 10,
-            WindowSystemCursor::Pointer => 11,
-            WindowSystemCursor::NwResize => 12,
-            WindowSystemCursor::NResize => 13,
-            WindowSystemCursor::NeResize => 14,
-            WindowSystemCursor::EResize => 15,
-            WindowSystemCursor::SeResize => 16,
-            WindowSystemCursor::SResize => 17,
-            WindowSystemCursor::SwResize => 18,
-            WindowSystemCursor::WResize => 19,
-        })
+    impl From<&sys::video::SDL_DisplayMode> for WindowDisplayMode {
+        fn from(value: &sys::video::SDL_DisplayMode) -> Self {
+            Self {
+                display_id: value.displayID.into(),
+                format: value.format.into(),
+                width: value.w,
+                height: value.h,
+                pixel_density: value.pixel_density,
+                refresh_rate: value.refresh_rate,
+                refresh_rate_numerator: value.refresh_rate_numerator,
+                refresh_rate_denominator: value.refresh_rate_denominator,
+                internal: value.internal.cast(),
+            }
+        }
+    }
+
+    impl From<sys::video::SDL_DisplayOrientation> for WindowDisplayOrientation {
+        fn from(value: sys::video::SDL_DisplayOrientation) -> Self {
+            match value {
+                sys::video::SDL_ORIENTATION_LANDSCAPE => Self::Landscape,
+                sys::video::SDL_ORIENTATION_LANDSCAPE_FLIPPED => Self::LandscapeFlipped,
+                sys::video::SDL_ORIENTATION_PORTRAIT => Self::Portrait,
+                sys::video::SDL_ORIENTATION_PORTRAIT_FLIPPED => Self::PortraitFlipped,
+                _ => Self::Unknown,
+            }
+        }
+    }
+
+    impl From<sys::video::SDL_DisplayMode> for WindowDisplayMode {
+        fn from(value: sys::video::SDL_DisplayMode) -> Self {
+            Self::from(&value)
+        }
+    }
+
+    impl<'a> From<&'a mut sys::surface::SDL_Surface> for WindowSurfaceRef<'a> {
+        fn from(value: &'a mut sys::surface::SDL_Surface) -> Self {
+            Self {
+                raw: NonNull::from(value).cast(),
+                marker: PhantomData,
+            }
+        }
+    }
+
+    impl From<&WindowSurfaceRef<'_>> for *mut sys::surface::SDL_Surface {
+        fn from(value: &WindowSurfaceRef<'_>) -> Self {
+            value.raw.cast().as_ptr()
+        }
+    }
+
+    impl From<sys::rect::SDL_Rect> for WindowRect {
+        fn from(value: sys::rect::SDL_Rect) -> Self {
+            Self {
+                x: value.x,
+                y: value.y,
+                width: value.w,
+                height: value.h,
+            }
+        }
+    }
+
+    impl From<WindowRect> for sys::rect::SDL_Rect {
+        fn from(value: WindowRect) -> Self {
+            Self {
+                x: value.x,
+                y: value.y,
+                w: value.width,
+                h: value.height,
+            }
+        }
+    }
+
+    impl From<sys::video::SDL_WindowFlags> for WindowFlags {
+        fn from(value: sys::video::SDL_WindowFlags) -> Self {
+            Self::from_bits_retain(value.0)
+        }
+    }
+
+    impl From<WindowFlags> for sys::video::SDL_WindowFlags {
+        fn from(value: WindowFlags) -> Self {
+            Self(value.bits())
+        }
+    }
+
+    impl From<sys::video::SDL_FlashOperation> for WindowFlashOperation {
+        fn from(value: sys::video::SDL_FlashOperation) -> Self {
+            match value {
+                sys::video::SDL_FlashOperation::CANCEL => Self::Cancel,
+                sys::video::SDL_FlashOperation::BRIEFLY => Self::Briefly,
+                sys::video::SDL_FlashOperation::UNTIL_FOCUSED => Self::UntilFocused,
+                value => Self::Unknown(value.0),
+            }
+        }
+    }
+
+    impl From<WindowFlashOperation> for sys::video::SDL_FlashOperation {
+        fn from(value: WindowFlashOperation) -> Self {
+            match value {
+                WindowFlashOperation::Cancel => Self::CANCEL,
+                WindowFlashOperation::Briefly => Self::BRIEFLY,
+                WindowFlashOperation::UntilFocused => Self::UNTIL_FOCUSED,
+                WindowFlashOperation::Unknown(value) => Self(value),
+            }
+        }
+    }
+
+    impl From<sys::video::SDL_HitTestResult> for WindowHitTestResult {
+        fn from(value: sys::video::SDL_HitTestResult) -> Self {
+            match value {
+                sys::video::SDL_HitTestResult::NORMAL => Self::Normal,
+                sys::video::SDL_HitTestResult::DRAGGABLE => Self::Draggable,
+                sys::video::SDL_HitTestResult::RESIZE_TOPLEFT => Self::ResizeTopLeft,
+                sys::video::SDL_HitTestResult::RESIZE_TOP => Self::ResizeTop,
+                sys::video::SDL_HitTestResult::RESIZE_TOPRIGHT => Self::ResizeTopRight,
+                sys::video::SDL_HitTestResult::RESIZE_RIGHT => Self::ResizeRight,
+                sys::video::SDL_HitTestResult::RESIZE_BOTTOMRIGHT => Self::ResizeBottomRight,
+                sys::video::SDL_HitTestResult::RESIZE_BOTTOM => Self::ResizeBottom,
+                sys::video::SDL_HitTestResult::RESIZE_BOTTOMLEFT => Self::ResizeBottomLeft,
+                sys::video::SDL_HitTestResult::RESIZE_LEFT => Self::ResizeLeft,
+                value => Self::Unknown(value.0),
+            }
+        }
+    }
+
+    impl From<WindowHitTestResult> for sys::video::SDL_HitTestResult {
+        fn from(value: WindowHitTestResult) -> Self {
+            match value {
+                WindowHitTestResult::Normal => Self::NORMAL,
+                WindowHitTestResult::Draggable => Self::DRAGGABLE,
+                WindowHitTestResult::ResizeTopLeft => Self::RESIZE_TOPLEFT,
+                WindowHitTestResult::ResizeTop => Self::RESIZE_TOP,
+                WindowHitTestResult::ResizeTopRight => Self::RESIZE_TOPRIGHT,
+                WindowHitTestResult::ResizeRight => Self::RESIZE_RIGHT,
+                WindowHitTestResult::ResizeBottomRight => Self::RESIZE_BOTTOMRIGHT,
+                WindowHitTestResult::ResizeBottom => Self::RESIZE_BOTTOM,
+                WindowHitTestResult::ResizeBottomLeft => Self::RESIZE_BOTTOMLEFT,
+                WindowHitTestResult::ResizeLeft => Self::RESIZE_LEFT,
+                WindowHitTestResult::Unknown(value) => Self(value),
+            }
+        }
+    }
+
+    impl From<sys::video::SDL_ProgressState> for WindowProgressState {
+        fn from(value: sys::video::SDL_ProgressState) -> Self {
+            match value {
+                sys::video::SDL_ProgressState::INVALID => Self::Invalid,
+                sys::video::SDL_ProgressState::NONE => Self::None,
+                sys::video::SDL_ProgressState::INDETERMINATE => Self::Indeterminate,
+                sys::video::SDL_ProgressState::NORMAL => Self::Normal,
+                sys::video::SDL_ProgressState::PAUSED => Self::Paused,
+                sys::video::SDL_ProgressState::ERROR => Self::Error,
+                value => Self::Unknown(value.0),
+            }
+        }
+    }
+
+    impl From<WindowProgressState> for sys::video::SDL_ProgressState {
+        fn from(value: WindowProgressState) -> Self {
+            match value {
+                WindowProgressState::Invalid => Self::INVALID,
+                WindowProgressState::None => Self::NONE,
+                WindowProgressState::Indeterminate => Self::INDETERMINATE,
+                WindowProgressState::Normal => Self::NORMAL,
+                WindowProgressState::Paused => Self::PAUSED,
+                WindowProgressState::Error => Self::ERROR,
+                WindowProgressState::Unknown(value) => Self(value),
+            }
+        }
+    }
+
+    impl From<sys::keyboard::SDL_KeyboardID> for WindowKeyboardId {
+        fn from(value: sys::keyboard::SDL_KeyboardID) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::mouse::SDL_MouseID> for WindowMouseId {
+        fn from(value: sys::mouse::SDL_MouseID) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::joystick::SDL_JoystickID> for WindowJoystickId {
+        fn from(value: sys::joystick::SDL_JoystickID) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::audio::SDL_AudioDeviceID> for WindowAudioDeviceId {
+        fn from(value: sys::audio::SDL_AudioDeviceID) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::camera::SDL_CameraID> for WindowCameraId {
+        fn from(value: sys::camera::SDL_CameraID) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::sensor::SDL_SensorID> for WindowSensorId {
+        fn from(value: sys::sensor::SDL_SensorID) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::touch::SDL_TouchID> for WindowTouchId {
+        fn from(value: sys::touch::SDL_TouchID) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::touch::SDL_FingerID> for WindowFingerId {
+        fn from(value: sys::touch::SDL_FingerID) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::pen::SDL_PenID> for WindowPenId {
+        fn from(value: sys::pen::SDL_PenID) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::scancode::SDL_Scancode> for WindowScancode {
+        fn from(value: sys::scancode::SDL_Scancode) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::keycode::SDL_Keycode> for WindowKeycode {
+        fn from(value: sys::keycode::SDL_Keycode) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::keycode::SDL_Keymod> for WindowKeymod {
+        fn from(value: sys::keycode::SDL_Keymod) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::mouse::SDL_MouseButtonFlags> for WindowMouseButtonFlags {
+        fn from(value: sys::mouse::SDL_MouseButtonFlags) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::mouse::SDL_MouseWheelDirection> for WindowMouseWheelDirection {
+        fn from(value: sys::mouse::SDL_MouseWheelDirection) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::power::SDL_PowerState> for WindowPowerState {
+        fn from(value: sys::power::SDL_PowerState) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::pen::SDL_PenInputFlags> for WindowPenInputFlags {
+        fn from(value: sys::pen::SDL_PenInputFlags) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::pen::SDL_PenDeviceType> for WindowPenDeviceType {
+        fn from(value: sys::pen::SDL_PenDeviceType) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::pen::SDL_PenAxis> for WindowPenAxis {
+        fn from(value: sys::pen::SDL_PenAxis) -> Self {
+            Self(value.0)
+        }
+    }
+
+    impl From<sys::events::SDL_KeyboardDeviceEvent> for WindowKeyboardDeviceEvent {
+        fn from(value: sys::events::SDL_KeyboardDeviceEvent) -> Self {
+            Self {
+                which: value.which.into(),
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_KeyboardEvent> for WindowKeyboardEvent {
+        fn from(value: sys::events::SDL_KeyboardEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                scancode: value.scancode.into(),
+                key: value.key.into(),
+                modifiers: value.r#mod.into(),
+                raw: value.raw,
+                down: value.down,
+                repeat: value.repeat,
+            }
+        }
+    }
+
+    impl WindowTextEditingEvent {
+        /// # Safety
+        /// All non-null string pointers and counted arrays must be valid for reading.
+        /// Each string must be NUL-terminated and remain valid during this call.
+        pub unsafe fn from_sdl(value: &sys::events::SDL_TextEditingEvent) -> Self {
+            Self {
+                text: unsafe { copy_string(value.text) }.unwrap_or_default(),
+                start: value.start,
+                length: value.length,
+            }
+        }
+    }
+
+    impl WindowTextEditingCandidatesEvent {
+        /// # Safety
+        /// All non-null string pointers and counted arrays must be valid for reading.
+        /// Each string must be NUL-terminated and remain valid during this call.
+        pub unsafe fn from_sdl(value: &sys::events::SDL_TextEditingCandidatesEvent) -> Self {
+            Self {
+                candidates: unsafe { copy_strings(value.candidates, value.num_candidates) },
+                num_candidates: value.num_candidates,
+                selected_candidate: value.selected_candidate,
+                horizontal: value.horizontal,
+            }
+        }
+    }
+
+    impl WindowTextInputEvent {
+        /// # Safety
+        /// All non-null string pointers and counted arrays must be valid for reading.
+        /// Each string must be NUL-terminated and remain valid during this call.
+        pub unsafe fn from_sdl(value: &sys::events::SDL_TextInputEvent) -> Self {
+            Self {
+                text: unsafe { copy_string(value.text) }.unwrap_or_default(),
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_MouseDeviceEvent> for WindowMouseDeviceEvent {
+        fn from(value: sys::events::SDL_MouseDeviceEvent) -> Self {
+            Self {
+                which: value.which.into(),
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_MouseMotionEvent> for WindowMouseMotionEvent {
+        fn from(value: sys::events::SDL_MouseMotionEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                state: value.state.into(),
+                x: value.x,
+                y: value.y,
+                xrel: value.xrel,
+                yrel: value.yrel,
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_MouseButtonEvent> for WindowMouseButtonEvent {
+        fn from(value: sys::events::SDL_MouseButtonEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                button: value.button,
+                down: value.down,
+                clicks: value.clicks,
+                x: value.x,
+                y: value.y,
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_MouseWheelEvent> for WindowMouseWheelEvent {
+        fn from(value: sys::events::SDL_MouseWheelEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                x: value.x,
+                y: value.y,
+                direction: value.direction.into(),
+                mouse_x: value.mouse_x,
+                mouse_y: value.mouse_y,
+                integer_x: value.integer_x,
+                integer_y: value.integer_y,
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_JoyAxisEvent> for WindowJoyAxisEvent {
+        fn from(value: sys::events::SDL_JoyAxisEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                axis: value.axis,
+                value: value.value,
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_JoyBallEvent> for WindowJoyBallEvent {
+        fn from(value: sys::events::SDL_JoyBallEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                ball: value.ball,
+                xrel: value.xrel,
+                yrel: value.yrel,
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_JoyHatEvent> for WindowJoyHatEvent {
+        fn from(value: sys::events::SDL_JoyHatEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                hat: value.hat,
+                value: value.value,
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_JoyButtonEvent> for WindowJoyButtonEvent {
+        fn from(value: sys::events::SDL_JoyButtonEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                button: value.button,
+                down: value.down,
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_JoyDeviceEvent> for WindowJoyDeviceEvent {
+        fn from(value: sys::events::SDL_JoyDeviceEvent) -> Self {
+            Self {
+                which: value.which.into(),
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_JoyBatteryEvent> for WindowJoyBatteryEvent {
+        fn from(value: sys::events::SDL_JoyBatteryEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                state: value.state.into(),
+                percent: value.percent,
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_GamepadAxisEvent> for WindowGamepadAxisEvent {
+        fn from(value: sys::events::SDL_GamepadAxisEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                axis: value.axis,
+                value: value.value,
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_GamepadButtonEvent> for WindowGamepadButtonEvent {
+        fn from(value: sys::events::SDL_GamepadButtonEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                button: value.button,
+                down: value.down,
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_GamepadDeviceEvent> for WindowGamepadDeviceEvent {
+        fn from(value: sys::events::SDL_GamepadDeviceEvent) -> Self {
+            Self {
+                which: value.which.into(),
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_GamepadTouchpadEvent> for WindowGamepadTouchpadEvent {
+        fn from(value: sys::events::SDL_GamepadTouchpadEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                touchpad: value.touchpad,
+                finger: value.finger,
+                x: value.x,
+                y: value.y,
+                pressure: value.pressure,
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_GamepadSensorEvent> for WindowGamepadSensorEvent {
+        fn from(value: sys::events::SDL_GamepadSensorEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                sensor: value.sensor,
+                data: value.data,
+                sensor_timestamp: value.sensor_timestamp,
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_AudioDeviceEvent> for WindowAudioDeviceEvent {
+        fn from(value: sys::events::SDL_AudioDeviceEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                recording: value.recording,
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_CameraDeviceEvent> for WindowCameraDeviceEvent {
+        fn from(value: sys::events::SDL_CameraDeviceEvent) -> Self {
+            Self {
+                which: value.which.into(),
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_TouchFingerEvent> for WindowTouchFingerEvent {
+        fn from(value: sys::events::SDL_TouchFingerEvent) -> Self {
+            Self {
+                touch_id: value.touchID.into(),
+                finger_id: value.fingerID.into(),
+                x: value.x,
+                y: value.y,
+                dx: value.dx,
+                dy: value.dy,
+                pressure: value.pressure,
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_PinchFingerEvent> for WindowPinchFingerEvent {
+        fn from(value: sys::events::SDL_PinchFingerEvent) -> Self {
+            Self { scale: value.scale }
+        }
+    }
+
+    impl From<sys::events::SDL_PenProximityEvent> for WindowPenProximityEvent {
+        fn from(value: sys::events::SDL_PenProximityEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                pen_state: value.pen_state.into(),
+                device_type: value.device_type.into(),
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_PenMotionEvent> for WindowPenMotionEvent {
+        fn from(value: sys::events::SDL_PenMotionEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                pen_state: value.pen_state.into(),
+                x: value.x,
+                y: value.y,
+                device_type: value.device_type.into(),
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_PenTouchEvent> for WindowPenTouchEvent {
+        fn from(value: sys::events::SDL_PenTouchEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                pen_state: value.pen_state.into(),
+                x: value.x,
+                y: value.y,
+                eraser: value.eraser,
+                down: value.down,
+                device_type: value.device_type.into(),
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_PenButtonEvent> for WindowPenButtonEvent {
+        fn from(value: sys::events::SDL_PenButtonEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                pen_state: value.pen_state.into(),
+                x: value.x,
+                y: value.y,
+                button: value.button,
+                down: value.down,
+                device_type: value.device_type.into(),
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_PenAxisEvent> for WindowPenAxisEvent {
+        fn from(value: sys::events::SDL_PenAxisEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                pen_state: value.pen_state.into(),
+                x: value.x,
+                y: value.y,
+                axis: value.axis.into(),
+                value: value.value,
+                device_type: value.device_type.into(),
+            }
+        }
+    }
+
+    impl WindowDropEvent {
+        /// # Safety
+        /// All non-null string pointers and counted arrays must be valid for reading.
+        /// Each string must be NUL-terminated and remain valid during this call.
+        pub unsafe fn from_sdl(value: &sys::events::SDL_DropEvent) -> Self {
+            Self {
+                x: value.x,
+                y: value.y,
+                source: unsafe { copy_string(value.source) },
+                data: unsafe { copy_string(value.data) },
+            }
+        }
+    }
+
+    impl WindowClipboardEvent {
+        /// # Safety
+        /// All non-null string pointers and counted arrays must be valid for reading.
+        /// Each string must be NUL-terminated and remain valid during this call.
+        pub unsafe fn from_sdl(value: &sys::events::SDL_ClipboardEvent) -> Self {
+            Self {
+                owner: value.owner,
+                num_mime_types: value.num_mime_types,
+                mime_types: unsafe { copy_strings(value.mime_types, value.num_mime_types) },
+            }
+        }
+    }
+
+    impl From<sys::events::SDL_SensorEvent> for WindowSensorEvent {
+        fn from(value: sys::events::SDL_SensorEvent) -> Self {
+            Self {
+                which: value.which.into(),
+                data: value.data,
+                sensor_timestamp: value.sensor_timestamp,
+            }
+        }
+    }
+
+    impl WindowEvent {
+        /// Returns None for internal, user-defined, and unrecognized SDL events.
+        ///
+        /// # Safety
+        /// The tag must identify an initialized SDL event payload.
+        /// Referenced strings and counted arrays must be valid for reading during this call.
+        pub unsafe fn from_sdl(value: &sys::events::SDL_Event) -> Option<Self> {
+            let event_type = sys::events::SDL_EventType(unsafe { value.r#type });
+            let timestamp = unsafe { value.common.timestamp };
+            let (window_id, kind) = match event_type {
+                sys::events::SDL_EVENT_QUIT => (WindowId(0), WindowEventKind::Quit),
+                sys::events::SDL_EVENT_TERMINATING => (WindowId(0), WindowEventKind::Terminating),
+                sys::events::SDL_EVENT_LOW_MEMORY => (WindowId(0), WindowEventKind::LowMemory),
+                sys::events::SDL_EVENT_WILL_ENTER_BACKGROUND => {
+                    (WindowId(0), WindowEventKind::WillEnterBackground)
+                }
+                sys::events::SDL_EVENT_DID_ENTER_BACKGROUND => {
+                    (WindowId(0), WindowEventKind::DidEnterBackground)
+                }
+                sys::events::SDL_EVENT_WILL_ENTER_FOREGROUND => {
+                    (WindowId(0), WindowEventKind::WillEnterForeground)
+                }
+                sys::events::SDL_EVENT_DID_ENTER_FOREGROUND => {
+                    (WindowId(0), WindowEventKind::DidEnterForeground)
+                }
+                sys::events::SDL_EVENT_LOCALE_CHANGED => {
+                    (WindowId(0), WindowEventKind::LocaleChanged)
+                }
+                sys::events::SDL_EVENT_SYSTEM_THEME_CHANGED => {
+                    (WindowId(0), WindowEventKind::SystemThemeChanged)
+                }
+                sys::events::SDL_EVENT_DISPLAY_ORIENTATION => (
+                    WindowId(0),
+                    WindowEventKind::DisplayOrientation {
+                        display_id: unsafe { value.display.displayID }.into(),
+                        orientation: sys::video::SDL_DisplayOrientation(unsafe {
+                            value.display.data1
+                        })
+                        .into(),
+                    },
+                ),
+                sys::events::SDL_EVENT_DISPLAY_ADDED => (
+                    WindowId(0),
+                    WindowEventKind::DisplayAdded {
+                        display_id: unsafe { value.display.displayID }.into(),
+                    },
+                ),
+                sys::events::SDL_EVENT_DISPLAY_REMOVED => (
+                    WindowId(0),
+                    WindowEventKind::DisplayRemoved {
+                        display_id: unsafe { value.display.displayID }.into(),
+                    },
+                ),
+                sys::events::SDL_EVENT_DISPLAY_MOVED => (
+                    WindowId(0),
+                    WindowEventKind::DisplayMoved {
+                        display_id: unsafe { value.display.displayID }.into(),
+                    },
+                ),
+                sys::events::SDL_EVENT_DISPLAY_DESKTOP_MODE_CHANGED => (
+                    WindowId(0),
+                    WindowEventKind::DisplayDesktopModeChanged {
+                        display_id: unsafe { value.display.displayID }.into(),
+                        width: unsafe { value.display.data1 },
+                        height: unsafe { value.display.data2 },
+                    },
+                ),
+                sys::events::SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED => (
+                    WindowId(0),
+                    WindowEventKind::DisplayCurrentModeChanged {
+                        display_id: unsafe { value.display.displayID }.into(),
+                        width: unsafe { value.display.data1 },
+                        height: unsafe { value.display.data2 },
+                    },
+                ),
+                sys::events::SDL_EVENT_DISPLAY_CONTENT_SCALE_CHANGED => (
+                    WindowId(0),
+                    WindowEventKind::DisplayContentScaleChanged {
+                        display_id: unsafe { value.display.displayID }.into(),
+                    },
+                ),
+                sys::events::SDL_EVENT_DISPLAY_USABLE_BOUNDS_CHANGED => (
+                    WindowId(0),
+                    WindowEventKind::DisplayUsableBoundsChanged {
+                        display_id: unsafe { value.display.displayID }.into(),
+                    },
+                ),
+                sys::events::SDL_EVENT_KEY_DOWN => (
+                    unsafe { value.key.windowID }.into(),
+                    WindowEventKind::KeyDown(unsafe { value.key }.into()),
+                ),
+                sys::events::SDL_EVENT_KEY_UP => (
+                    unsafe { value.key.windowID }.into(),
+                    WindowEventKind::KeyUp(unsafe { value.key }.into()),
+                ),
+                sys::events::SDL_EVENT_TEXT_EDITING => (
+                    unsafe { value.edit.windowID }.into(),
+                    WindowEventKind::TextEditing(unsafe {
+                        WindowTextEditingEvent::from_sdl(&value.edit)
+                    }),
+                ),
+                sys::events::SDL_EVENT_TEXT_INPUT => (
+                    unsafe { value.text.windowID }.into(),
+                    WindowEventKind::TextInput(unsafe {
+                        WindowTextInputEvent::from_sdl(&value.text)
+                    }),
+                ),
+                sys::events::SDL_EVENT_KEYMAP_CHANGED => {
+                    (WindowId(0), WindowEventKind::KeymapChanged)
+                }
+                sys::events::SDL_EVENT_KEYBOARD_ADDED => (
+                    WindowId(0),
+                    WindowEventKind::KeyboardAdded(unsafe { value.kdevice }.into()),
+                ),
+                sys::events::SDL_EVENT_KEYBOARD_REMOVED => (
+                    WindowId(0),
+                    WindowEventKind::KeyboardRemoved(unsafe { value.kdevice }.into()),
+                ),
+                sys::events::SDL_EVENT_TEXT_EDITING_CANDIDATES => (
+                    unsafe { value.edit_candidates.windowID }.into(),
+                    WindowEventKind::TextEditingCandidates(unsafe {
+                        WindowTextEditingCandidatesEvent::from_sdl(&value.edit_candidates)
+                    }),
+                ),
+                sys::events::SDL_EVENT_SCREEN_KEYBOARD_SHOWN => {
+                    (WindowId(0), WindowEventKind::ScreenKeyboardShown)
+                }
+                sys::events::SDL_EVENT_SCREEN_KEYBOARD_HIDDEN => {
+                    (WindowId(0), WindowEventKind::ScreenKeyboardHidden)
+                }
+                sys::events::SDL_EVENT_MOUSE_MOTION => (
+                    unsafe { value.motion.windowID }.into(),
+                    WindowEventKind::MouseMotion(unsafe { value.motion }.into()),
+                ),
+                sys::events::SDL_EVENT_MOUSE_BUTTON_DOWN => (
+                    unsafe { value.button.windowID }.into(),
+                    WindowEventKind::MouseButtonDown(unsafe { value.button }.into()),
+                ),
+                sys::events::SDL_EVENT_MOUSE_BUTTON_UP => (
+                    unsafe { value.button.windowID }.into(),
+                    WindowEventKind::MouseButtonUp(unsafe { value.button }.into()),
+                ),
+                sys::events::SDL_EVENT_MOUSE_WHEEL => (
+                    unsafe { value.wheel.windowID }.into(),
+                    WindowEventKind::MouseWheel(unsafe { value.wheel }.into()),
+                ),
+                sys::events::SDL_EVENT_MOUSE_ADDED => (
+                    WindowId(0),
+                    WindowEventKind::MouseAdded(unsafe { value.mdevice }.into()),
+                ),
+                sys::events::SDL_EVENT_MOUSE_REMOVED => (
+                    WindowId(0),
+                    WindowEventKind::MouseRemoved(unsafe { value.mdevice }.into()),
+                ),
+                sys::events::SDL_EVENT_JOYSTICK_AXIS_MOTION => (
+                    WindowId(0),
+                    WindowEventKind::JoystickAxisMotion(unsafe { value.jaxis }.into()),
+                ),
+                sys::events::SDL_EVENT_JOYSTICK_BALL_MOTION => (
+                    WindowId(0),
+                    WindowEventKind::JoystickBallMotion(unsafe { value.jball }.into()),
+                ),
+                sys::events::SDL_EVENT_JOYSTICK_HAT_MOTION => (
+                    WindowId(0),
+                    WindowEventKind::JoystickHatMotion(unsafe { value.jhat }.into()),
+                ),
+                sys::events::SDL_EVENT_JOYSTICK_BUTTON_DOWN => (
+                    WindowId(0),
+                    WindowEventKind::JoystickButtonDown(unsafe { value.jbutton }.into()),
+                ),
+                sys::events::SDL_EVENT_JOYSTICK_BUTTON_UP => (
+                    WindowId(0),
+                    WindowEventKind::JoystickButtonUp(unsafe { value.jbutton }.into()),
+                ),
+                sys::events::SDL_EVENT_JOYSTICK_ADDED => (
+                    WindowId(0),
+                    WindowEventKind::JoystickAdded(unsafe { value.jdevice }.into()),
+                ),
+                sys::events::SDL_EVENT_JOYSTICK_REMOVED => (
+                    WindowId(0),
+                    WindowEventKind::JoystickRemoved(unsafe { value.jdevice }.into()),
+                ),
+                sys::events::SDL_EVENT_JOYSTICK_BATTERY_UPDATED => (
+                    WindowId(0),
+                    WindowEventKind::JoystickBatteryUpdated(unsafe { value.jbattery }.into()),
+                ),
+                sys::events::SDL_EVENT_JOYSTICK_UPDATE_COMPLETE => (
+                    WindowId(0),
+                    WindowEventKind::JoystickUpdateComplete(unsafe { value.jdevice }.into()),
+                ),
+                sys::events::SDL_EVENT_GAMEPAD_AXIS_MOTION => (
+                    WindowId(0),
+                    WindowEventKind::GamepadAxisMotion(unsafe { value.gaxis }.into()),
+                ),
+                sys::events::SDL_EVENT_GAMEPAD_BUTTON_DOWN => (
+                    WindowId(0),
+                    WindowEventKind::GamepadButtonDown(unsafe { value.gbutton }.into()),
+                ),
+                sys::events::SDL_EVENT_GAMEPAD_BUTTON_UP => (
+                    WindowId(0),
+                    WindowEventKind::GamepadButtonUp(unsafe { value.gbutton }.into()),
+                ),
+                sys::events::SDL_EVENT_GAMEPAD_ADDED => (
+                    WindowId(0),
+                    WindowEventKind::GamepadAdded(unsafe { value.gdevice }.into()),
+                ),
+                sys::events::SDL_EVENT_GAMEPAD_REMOVED => (
+                    WindowId(0),
+                    WindowEventKind::GamepadRemoved(unsafe { value.gdevice }.into()),
+                ),
+                sys::events::SDL_EVENT_GAMEPAD_REMAPPED => (
+                    WindowId(0),
+                    WindowEventKind::GamepadRemapped(unsafe { value.gdevice }.into()),
+                ),
+                sys::events::SDL_EVENT_GAMEPAD_TOUCHPAD_DOWN => (
+                    WindowId(0),
+                    WindowEventKind::GamepadTouchpadDown(unsafe { value.gtouchpad }.into()),
+                ),
+                sys::events::SDL_EVENT_GAMEPAD_TOUCHPAD_MOTION => (
+                    WindowId(0),
+                    WindowEventKind::GamepadTouchpadMotion(unsafe { value.gtouchpad }.into()),
+                ),
+                sys::events::SDL_EVENT_GAMEPAD_TOUCHPAD_UP => (
+                    WindowId(0),
+                    WindowEventKind::GamepadTouchpadUp(unsafe { value.gtouchpad }.into()),
+                ),
+                sys::events::SDL_EVENT_GAMEPAD_SENSOR_UPDATE => (
+                    WindowId(0),
+                    WindowEventKind::GamepadSensorUpdate(unsafe { value.gsensor }.into()),
+                ),
+                sys::events::SDL_EVENT_GAMEPAD_UPDATE_COMPLETE => (
+                    WindowId(0),
+                    WindowEventKind::GamepadUpdateComplete(unsafe { value.gdevice }.into()),
+                ),
+                sys::events::SDL_EVENT_GAMEPAD_STEAM_HANDLE_UPDATED => (
+                    WindowId(0),
+                    WindowEventKind::GamepadSteamHandleUpdated(unsafe { value.gdevice }.into()),
+                ),
+                sys::events::SDL_EVENT_FINGER_DOWN => (
+                    unsafe { value.tfinger.windowID }.into(),
+                    WindowEventKind::FingerDown(unsafe { value.tfinger }.into()),
+                ),
+                sys::events::SDL_EVENT_FINGER_UP => (
+                    unsafe { value.tfinger.windowID }.into(),
+                    WindowEventKind::FingerUp(unsafe { value.tfinger }.into()),
+                ),
+                sys::events::SDL_EVENT_FINGER_MOTION => (
+                    unsafe { value.tfinger.windowID }.into(),
+                    WindowEventKind::FingerMotion(unsafe { value.tfinger }.into()),
+                ),
+                sys::events::SDL_EVENT_FINGER_CANCELED => (
+                    unsafe { value.tfinger.windowID }.into(),
+                    WindowEventKind::FingerCanceled(unsafe { value.tfinger }.into()),
+                ),
+                sys::events::SDL_EVENT_PINCH_BEGIN => (
+                    unsafe { value.pinch.windowID }.into(),
+                    WindowEventKind::PinchBegin(unsafe { value.pinch }.into()),
+                ),
+                sys::events::SDL_EVENT_PINCH_UPDATE => (
+                    unsafe { value.pinch.windowID }.into(),
+                    WindowEventKind::PinchUpdate(unsafe { value.pinch }.into()),
+                ),
+                sys::events::SDL_EVENT_PINCH_END => (
+                    unsafe { value.pinch.windowID }.into(),
+                    WindowEventKind::PinchEnd(unsafe { value.pinch }.into()),
+                ),
+                sys::events::SDL_EVENT_CLIPBOARD_UPDATE => (
+                    WindowId(0),
+                    WindowEventKind::ClipboardUpdate(unsafe {
+                        WindowClipboardEvent::from_sdl(&value.clipboard)
+                    }),
+                ),
+                sys::events::SDL_EVENT_DROP_FILE => (
+                    unsafe { value.drop.windowID }.into(),
+                    WindowEventKind::DropFile(unsafe { WindowDropEvent::from_sdl(&value.drop) }),
+                ),
+                sys::events::SDL_EVENT_DROP_TEXT => (
+                    unsafe { value.drop.windowID }.into(),
+                    WindowEventKind::DropText(unsafe { WindowDropEvent::from_sdl(&value.drop) }),
+                ),
+                sys::events::SDL_EVENT_DROP_BEGIN => (
+                    unsafe { value.drop.windowID }.into(),
+                    WindowEventKind::DropBegin(unsafe { WindowDropEvent::from_sdl(&value.drop) }),
+                ),
+                sys::events::SDL_EVENT_DROP_COMPLETE => (
+                    unsafe { value.drop.windowID }.into(),
+                    WindowEventKind::DropComplete(unsafe {
+                        WindowDropEvent::from_sdl(&value.drop)
+                    }),
+                ),
+                sys::events::SDL_EVENT_DROP_POSITION => (
+                    unsafe { value.drop.windowID }.into(),
+                    WindowEventKind::DropPosition(unsafe {
+                        WindowDropEvent::from_sdl(&value.drop)
+                    }),
+                ),
+                sys::events::SDL_EVENT_AUDIO_DEVICE_ADDED => (
+                    WindowId(0),
+                    WindowEventKind::AudioDeviceAdded(unsafe { value.adevice }.into()),
+                ),
+                sys::events::SDL_EVENT_AUDIO_DEVICE_REMOVED => (
+                    WindowId(0),
+                    WindowEventKind::AudioDeviceRemoved(unsafe { value.adevice }.into()),
+                ),
+                sys::events::SDL_EVENT_AUDIO_DEVICE_FORMAT_CHANGED => (
+                    WindowId(0),
+                    WindowEventKind::AudioDeviceFormatChanged(unsafe { value.adevice }.into()),
+                ),
+                sys::events::SDL_EVENT_SENSOR_UPDATE => (
+                    WindowId(0),
+                    WindowEventKind::SensorUpdate(unsafe { value.sensor }.into()),
+                ),
+                sys::events::SDL_EVENT_PEN_PROXIMITY_IN => (
+                    unsafe { value.pproximity.windowID }.into(),
+                    WindowEventKind::PenProximityIn(unsafe { value.pproximity }.into()),
+                ),
+                sys::events::SDL_EVENT_PEN_PROXIMITY_OUT => (
+                    unsafe { value.pproximity.windowID }.into(),
+                    WindowEventKind::PenProximityOut(unsafe { value.pproximity }.into()),
+                ),
+                sys::events::SDL_EVENT_PEN_DOWN => (
+                    unsafe { value.ptouch.windowID }.into(),
+                    WindowEventKind::PenDown(unsafe { value.ptouch }.into()),
+                ),
+                sys::events::SDL_EVENT_PEN_UP => (
+                    unsafe { value.ptouch.windowID }.into(),
+                    WindowEventKind::PenUp(unsafe { value.ptouch }.into()),
+                ),
+                sys::events::SDL_EVENT_PEN_BUTTON_DOWN => (
+                    unsafe { value.pbutton.windowID }.into(),
+                    WindowEventKind::PenButtonDown(unsafe { value.pbutton }.into()),
+                ),
+                sys::events::SDL_EVENT_PEN_BUTTON_UP => (
+                    unsafe { value.pbutton.windowID }.into(),
+                    WindowEventKind::PenButtonUp(unsafe { value.pbutton }.into()),
+                ),
+                sys::events::SDL_EVENT_PEN_MOTION => (
+                    unsafe { value.pmotion.windowID }.into(),
+                    WindowEventKind::PenMotion(unsafe { value.pmotion }.into()),
+                ),
+                sys::events::SDL_EVENT_PEN_AXIS => (
+                    unsafe { value.paxis.windowID }.into(),
+                    WindowEventKind::PenAxis(unsafe { value.paxis }.into()),
+                ),
+                sys::events::SDL_EVENT_CAMERA_DEVICE_ADDED => (
+                    WindowId(0),
+                    WindowEventKind::CameraDeviceAdded(unsafe { value.cdevice }.into()),
+                ),
+                sys::events::SDL_EVENT_CAMERA_DEVICE_REMOVED => (
+                    WindowId(0),
+                    WindowEventKind::CameraDeviceRemoved(unsafe { value.cdevice }.into()),
+                ),
+                sys::events::SDL_EVENT_CAMERA_DEVICE_APPROVED => (
+                    WindowId(0),
+                    WindowEventKind::CameraDeviceApproved(unsafe { value.cdevice }.into()),
+                ),
+                sys::events::SDL_EVENT_CAMERA_DEVICE_DENIED => (
+                    WindowId(0),
+                    WindowEventKind::CameraDeviceDenied(unsafe { value.cdevice }.into()),
+                ),
+                sys::events::SDL_EVENT_RENDER_TARGETS_RESET => (
+                    unsafe { value.render.windowID }.into(),
+                    WindowEventKind::RenderTargetsReset,
+                ),
+                sys::events::SDL_EVENT_RENDER_DEVICE_RESET => (
+                    unsafe { value.render.windowID }.into(),
+                    WindowEventKind::RenderDeviceReset,
+                ),
+                sys::events::SDL_EVENT_RENDER_DEVICE_LOST => (
+                    unsafe { value.render.windowID }.into(),
+                    WindowEventKind::RenderDeviceLost,
+                ),
+                sys::events::SDL_EVENT_WINDOW_SHOWN => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowShown,
+                ),
+                sys::events::SDL_EVENT_WINDOW_HIDDEN => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowHidden,
+                ),
+                sys::events::SDL_EVENT_WINDOW_EXPOSED => {
+                    (unsafe { value.window.windowID }.into(), {
+                        let window = unsafe { value.window };
+                        WindowEventKind::WindowExposed {
+                            live_resize: window.data1 != 0,
+                        }
+                    })
+                }
+                sys::events::SDL_EVENT_WINDOW_MOVED => (unsafe { value.window.windowID }.into(), {
+                    let window = unsafe { value.window };
+                    WindowEventKind::WindowMoved {
+                        x: window.data1,
+                        y: window.data2,
+                    }
+                }),
+                sys::events::SDL_EVENT_WINDOW_RESIZED => {
+                    (unsafe { value.window.windowID }.into(), {
+                        let window = unsafe { value.window };
+                        WindowEventKind::WindowResized {
+                            width: window.data1,
+                            height: window.data2,
+                        }
+                    })
+                }
+                sys::events::SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED => {
+                    (unsafe { value.window.windowID }.into(), {
+                        let window = unsafe { value.window };
+                        WindowEventKind::WindowPixelSizeChanged {
+                            width: window.data1,
+                            height: window.data2,
+                        }
+                    })
+                }
+                sys::events::SDL_EVENT_WINDOW_METAL_VIEW_RESIZED => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowMetalViewResized,
+                ),
+                sys::events::SDL_EVENT_WINDOW_MINIMIZED => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowMinimized,
+                ),
+                sys::events::SDL_EVENT_WINDOW_MAXIMIZED => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowMaximized,
+                ),
+                sys::events::SDL_EVENT_WINDOW_RESTORED => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowRestored,
+                ),
+                sys::events::SDL_EVENT_WINDOW_MOUSE_ENTER => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowMouseEnter,
+                ),
+                sys::events::SDL_EVENT_WINDOW_MOUSE_LEAVE => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowMouseLeave,
+                ),
+                sys::events::SDL_EVENT_WINDOW_FOCUS_GAINED => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowFocusGained,
+                ),
+                sys::events::SDL_EVENT_WINDOW_FOCUS_LOST => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowFocusLost,
+                ),
+                sys::events::SDL_EVENT_WINDOW_CLOSE_REQUESTED => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowCloseRequested,
+                ),
+                sys::events::SDL_EVENT_WINDOW_HIT_TEST => {
+                    (unsafe { value.window.windowID }.into(), {
+                        let window = unsafe { value.window };
+                        WindowEventKind::WindowHitTest {
+                            data1: window.data1,
+                            data2: window.data2,
+                        }
+                    })
+                }
+                sys::events::SDL_EVENT_WINDOW_ICCPROF_CHANGED => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowICCProfChanged,
+                ),
+                sys::events::SDL_EVENT_WINDOW_DISPLAY_CHANGED => {
+                    (unsafe { value.window.windowID }.into(), {
+                        let window = unsafe { value.window };
+                        WindowEventKind::WindowDisplayChanged {
+                            display_id: WindowDisplayId(window.data1 as u32),
+                        }
+                    })
+                }
+                sys::events::SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowDisplayScaleChanged,
+                ),
+                sys::events::SDL_EVENT_WINDOW_SAFE_AREA_CHANGED => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowSafeAreaChanged,
+                ),
+                sys::events::SDL_EVENT_WINDOW_OCCLUDED => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowOccluded,
+                ),
+                sys::events::SDL_EVENT_WINDOW_ENTER_FULLSCREEN => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowEnterFullscreen,
+                ),
+                sys::events::SDL_EVENT_WINDOW_LEAVE_FULLSCREEN => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowLeaveFullscreen,
+                ),
+                sys::events::SDL_EVENT_WINDOW_DESTROYED => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowDestroyed,
+                ),
+                sys::events::SDL_EVENT_WINDOW_HDR_STATE_CHANGED => (
+                    unsafe { value.window.windowID }.into(),
+                    WindowEventKind::WindowHdrStateChanged,
+                ),
+                _ => return None,
+            };
+            Some(Self {
+                timestamp,
+                window_id,
+                kind,
+            })
+        }
+    }
+
+    impl From<WindowSystemCursor> for sys::mouse::SDL_SystemCursor {
+        fn from(value: WindowSystemCursor) -> Self {
+            Self(match value {
+                WindowSystemCursor::Default => 0,
+                WindowSystemCursor::Text => 1,
+                WindowSystemCursor::Wait => 2,
+                WindowSystemCursor::Crosshair => 3,
+                WindowSystemCursor::Progress => 4,
+                WindowSystemCursor::NwseResize => 5,
+                WindowSystemCursor::NeswResize => 6,
+                WindowSystemCursor::EwResize => 7,
+                WindowSystemCursor::NsResize => 8,
+                WindowSystemCursor::Move => 9,
+                WindowSystemCursor::NotAllowed => 10,
+                WindowSystemCursor::Pointer => 11,
+                WindowSystemCursor::NwResize => 12,
+                WindowSystemCursor::NResize => 13,
+                WindowSystemCursor::NeResize => 14,
+                WindowSystemCursor::EResize => 15,
+                WindowSystemCursor::SeResize => 16,
+                WindowSystemCursor::SResize => 17,
+                WindowSystemCursor::SwResize => 18,
+                WindowSystemCursor::WResize => 19,
+            })
+        }
+    }
+
+    unsafe fn copy_strings(values: *const *const c_char, count: i32) -> Vec<String> {
+        if count <= 0 {
+            return Vec::new();
+        }
+        unsafe { std::slice::from_raw_parts(values, count as usize) }
+            .iter()
+            .map(|value| unsafe { copy_string(*value) }.unwrap_or_default())
+            .collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn converts_window_header_and_position() {
+            let raw = sys::events::SDL_Event {
+                window: sys::events::SDL_WindowEvent {
+                    r#type: sys::events::SDL_EVENT_WINDOW_MOVED,
+                    timestamp: 42,
+                    windowID: sys::video::SDL_WindowID(7),
+                    data1: -20,
+                    data2: 30,
+                    ..Default::default()
+                },
+            };
+            let event = unsafe { WindowEvent::from_sdl(&raw) }.unwrap();
+            assert_eq!(event.timestamp, 42);
+            assert_eq!(event.window_id, WindowId(7));
+            assert_eq!(event.kind, WindowEventKind::WindowMoved { x: -20, y: 30 });
+        }
+
+        #[test]
+        fn converts_keyboard_header_and_payload() {
+            let raw = sys::events::SDL_Event {
+                key: sys::events::SDL_KeyboardEvent {
+                    r#type: sys::events::SDL_EVENT_KEY_DOWN,
+                    timestamp: 64,
+                    windowID: sys::video::SDL_WindowID(9),
+                    raw: 123,
+                    down: true,
+                    repeat: true,
+                    ..Default::default()
+                },
+            };
+            let event = unsafe { WindowEvent::from_sdl(&raw) }.unwrap();
+            assert_eq!(event.timestamp, 64);
+            assert_eq!(event.window_id, WindowId(9));
+            let WindowEventKind::KeyDown(key) = event.kind else {
+                panic!("expected key down")
+            };
+            assert_eq!(key.raw, 123);
+            assert!(key.down);
+            assert!(key.repeat);
+        }
+
+        #[test]
+        fn copies_text_with_its_window_header() {
+            let text = CString::new("input text").unwrap();
+            let raw = sys::events::SDL_Event {
+                text: sys::events::SDL_TextInputEvent {
+                    r#type: sys::events::SDL_EVENT_TEXT_INPUT,
+                    timestamp: 81,
+                    windowID: sys::video::SDL_WindowID(12),
+                    text: text.as_ptr(),
+                    ..Default::default()
+                },
+            };
+            let event = unsafe { WindowEvent::from_sdl(&raw) }.unwrap();
+            drop(text);
+            assert_eq!(event.timestamp, 81);
+            assert_eq!(event.window_id, WindowId(12));
+            assert_eq!(
+                event.kind,
+                WindowEventKind::TextInput(WindowTextInputEvent {
+                    text: "input text".into()
+                })
+            );
+        }
+
+        #[test]
+        fn converts_display_payloads_to_named_fields() {
+            let cases = [
+                (
+                    sys::events::SDL_EVENT_DISPLAY_ORIENTATION,
+                    sys::video::SDL_ORIENTATION_PORTRAIT_FLIPPED.0,
+                    0,
+                    WindowEventKind::DisplayOrientation {
+                        display_id: WindowDisplayId(27),
+                        orientation: WindowDisplayOrientation::PortraitFlipped,
+                    },
+                ),
+                (
+                    sys::events::SDL_EVENT_DISPLAY_DESKTOP_MODE_CHANGED,
+                    2560,
+                    1440,
+                    WindowEventKind::DisplayDesktopModeChanged {
+                        display_id: WindowDisplayId(27),
+                        width: 2560,
+                        height: 1440,
+                    },
+                ),
+                (
+                    sys::events::SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED,
+                    1920,
+                    1080,
+                    WindowEventKind::DisplayCurrentModeChanged {
+                        display_id: WindowDisplayId(27),
+                        width: 1920,
+                        height: 1080,
+                    },
+                ),
+                (
+                    sys::events::SDL_EVENT_DISPLAY_ADDED,
+                    0,
+                    0,
+                    WindowEventKind::DisplayAdded {
+                        display_id: WindowDisplayId(27),
+                    },
+                ),
+                (
+                    sys::events::SDL_EVENT_DISPLAY_REMOVED,
+                    0,
+                    0,
+                    WindowEventKind::DisplayRemoved {
+                        display_id: WindowDisplayId(27),
+                    },
+                ),
+                (
+                    sys::events::SDL_EVENT_DISPLAY_MOVED,
+                    0,
+                    0,
+                    WindowEventKind::DisplayMoved {
+                        display_id: WindowDisplayId(27),
+                    },
+                ),
+                (
+                    sys::events::SDL_EVENT_DISPLAY_CONTENT_SCALE_CHANGED,
+                    0,
+                    0,
+                    WindowEventKind::DisplayContentScaleChanged {
+                        display_id: WindowDisplayId(27),
+                    },
+                ),
+                (
+                    sys::events::SDL_EVENT_DISPLAY_USABLE_BOUNDS_CHANGED,
+                    0,
+                    0,
+                    WindowEventKind::DisplayUsableBoundsChanged {
+                        display_id: WindowDisplayId(27),
+                    },
+                ),
+            ];
+            for (event_type, data1, data2, expected) in cases {
+                let raw = sys::events::SDL_Event {
+                    display: sys::events::SDL_DisplayEvent {
+                        r#type: event_type,
+                        timestamp: 100,
+                        displayID: sys::video::SDL_DisplayID(27),
+                        data1,
+                        data2,
+                        ..Default::default()
+                    },
+                };
+                let event = unsafe { WindowEvent::from_sdl(&raw) }.unwrap();
+                assert_eq!(event.timestamp, 100);
+                assert_eq!(event.window_id, WindowId(0));
+                assert_eq!(event.kind, expected);
+            }
+        }
+
+        #[test]
+        fn preserves_global_event_identity() {
+            let raw = sys::events::SDL_Event {
+                display: sys::events::SDL_DisplayEvent {
+                    r#type: sys::events::SDL_EVENT_DISPLAY_ADDED,
+                    timestamp: 90,
+                    displayID: sys::video::SDL_DisplayID(27),
+                    ..Default::default()
+                },
+            };
+            let event = unsafe { WindowEvent::from_sdl(&raw) }.unwrap();
+            assert_eq!(event.timestamp, 90);
+            assert_eq!(event.window_id, WindowId(0));
+            assert!(matches!(
+                event.kind,
+                WindowEventKind::DisplayAdded {
+                    display_id: WindowDisplayId(27)
+                }
+            ));
+        }
+
+        #[test]
+        fn ignores_unsupported_events() {
+            for event_type in [
+                sys::events::SDL_EVENT_USER.0 + 3,
+                0x7fff,
+                sys::events::SDL_EVENT_PRIVATE0.0,
+                sys::events::SDL_EVENT_PRIVATE1.0,
+                sys::events::SDL_EVENT_PRIVATE2.0,
+                sys::events::SDL_EVENT_PRIVATE3.0,
+                sys::events::SDL_EVENT_POLL_SENTINEL.0,
+            ] {
+                let raw = sys::events::SDL_Event {
+                    common: sys::events::SDL_CommonEvent {
+                        r#type: event_type,
+                        timestamp: 92,
+                        ..Default::default()
+                    },
+                };
+                assert!(unsafe { WindowEvent::from_sdl(&raw) }.is_none());
+            }
+        }
+
+        #[test]
+        fn polling_continues_after_ignored_events() -> Result<(), WindowError> {
+            let mut sdl_inst = init()?;
+            unsafe {
+                sys::events::SDL_FlushEvents(
+                    sys::events::SDL_EVENT_FIRST.0,
+                    sys::events::SDL_EVENT_LAST.0,
+                )
+            };
+            for event_type in [
+                sys::events::SDL_EVENT_USER.0 + 3,
+                0x7fff,
+                sys::events::SDL_EVENT_PRIVATE0.0,
+                sys::events::SDL_EVENT_PRIVATE1.0,
+                sys::events::SDL_EVENT_PRIVATE2.0,
+                sys::events::SDL_EVENT_PRIVATE3.0,
+                sys::events::SDL_EVENT_QUIT.0,
+            ] {
+                let mut raw = sys::events::SDL_Event {
+                    common: sys::events::SDL_CommonEvent {
+                        r#type: event_type,
+                        timestamp: 99,
+                        ..Default::default()
+                    },
+                };
+                assert!(unsafe { sys::events::SDL_PushEvent(&mut raw) });
+            }
+            let event = sdl_inst
+                .poll_event()
+                .expect("expected the supported event after ignored events");
+            assert_eq!(event.kind, WindowEventKind::Quit);
+            assert_eq!(event.timestamp, 99);
+            assert_eq!(event.window_id, WindowId(0));
+            Ok(())
+        }
     }
 }

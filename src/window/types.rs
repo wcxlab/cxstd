@@ -1,8 +1,20 @@
 use std::{ffi::c_void, marker::PhantomData, ptr::NonNull};
 
+use super::WindowFlags;
+
 pub type WindowDisplayHandle<'a> = raw_window_handle::DisplayHandle<'a>;
 pub type WindowHandle<'a> = raw_window_handle::WindowHandle<'a>;
 pub type WindowHandleError = raw_window_handle::HandleError;
+
+#[derive(Clone, Copy, Debug)]
+pub struct WindowOptions<'a> {
+    pub title: &'a str,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub flags: WindowFlags,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum WindowSystemCursor {
@@ -34,6 +46,16 @@ pub struct WindowId(pub u32);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct WindowDisplayId(pub u32);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum WindowDisplayOrientation {
+    #[default]
+    Unknown,
+    Landscape,
+    LandscapeFlipped,
+    Portrait,
+    PortraitFlipped,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct WindowPropertiesId(pub u32);
