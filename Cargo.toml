@@ -1,0 +1,13 @@
+[package]
+name = "cxstd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+raw-window-handle = "0.6"
+thiserror = "2"
+winit = "0.30"
+
+[workspace]
+resolver = "3"

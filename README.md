@@ -1,1 +1,1 @@
-# cxcore
+# cxstd
