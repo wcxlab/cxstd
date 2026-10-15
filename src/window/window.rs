@@ -5,6 +5,14 @@ use super::{
 };
 
 pub trait Window {
+    fn request_redraw(&mut self);
+
+    fn request_close(&mut self);
+
+    fn take_redraw_request(&mut self) -> bool;
+
+    fn take_close_request(&mut self) -> bool;
+
     fn get_id(&self) -> Result<WindowId, WindowError>;
 
     fn get_display(&self) -> Result<WindowDisplayId, WindowError>;

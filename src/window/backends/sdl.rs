@@ -5,7 +5,9 @@
 //! `WindowHandler<W>` receives only the window; the handler is stored separately.
 //! Access native and GPU operations through `.window`, and application state through `.handler`.
 //! Route events through `window.window_event(&event)`.
-//! Call `window.update()` and `window.render()` from the host loop.
+//! Call `window.update()`; consume `.window.take_close_request()` and
+//! `.window.take_redraw_request()` in the host loop before rendering.
+//! Restore the redraw request when rendering is skipped; rendering never consumes requests.
 //! Frame access is limited to the render callback; frames and surfaces drop before the native window.
 
 #[cfg(feature = "wgpu")]
@@ -50,6 +52,8 @@ pub struct SdlWindow<const GPU: bool = false> {
     frame: RefCell<Option<FrameResources>>,
     #[cfg(feature = "wgpu")]
     gpu: Option<WgpuContext>,
+    redraw_requested: bool,
+    close_requested: bool,
     hit_test: Box<Option<HitTestCallback>>,
     owner: Rc<SdlWindowOwner>,
 }
@@ -89,9 +93,13 @@ impl<W: Window, H: WindowHandler<W>> SdlWindowWithHandler<W, H> {
 
 impl<H: WindowHandler<SdlWindow>> SdlWindowWithHandler<SdlWindow, H> {
     pub fn window_event(&mut self, event: &WindowEvent) -> Result<(), WindowError> {
-        self.handler
-            .window_event(&mut self.window, event)
-            .or_else(|error| self.handler.error(error))
+        let result = (|| {
+            if !self.window.apply_event_requests(event)? {
+                return Ok(());
+            }
+            self.handler.window_event(&mut self.window, event)
+        })();
+        result.or_else(|error| self.handler.error(error))
     }
 
     pub fn render(&mut self) -> Result<bool, WindowError> {
@@ -102,6 +110,20 @@ impl<H: WindowHandler<SdlWindow>> SdlWindowWithHandler<SdlWindow, H> {
         self.handler
             .frame_ready(&mut self.window)
             .or_else(|error| self.handler.error(error))?;
+        Ok(true)
+    }
+}
+
+impl<const GPU: bool> SdlWindow<GPU> {
+    fn apply_event_requests(&mut self, event: &WindowEvent) -> Result<bool, WindowError> {
+        if event.window_id != self.get_id()? {
+            return Ok(false);
+        }
+        if matches!(event.kind, WindowEventKind::WindowCloseRequested) {
+            self.request_close();
+        } else {
+            self.request_redraw();
+        }
         Ok(true)
     }
 }
@@ -190,6 +212,8 @@ impl SdlInstance {
             frame: RefCell::new(None),
             #[cfg(feature = "wgpu")]
             gpu: None,
+            redraw_requested: true,
+            close_requested: false,
             hit_test: Box::new(None),
             owner: Rc::new(SdlWindowOwner {
                 raw,
@@ -219,6 +243,22 @@ impl raw_window_handle::HasWindowHandle for SdlWindowOwner {
 }
 
 impl<const GPU: bool> Window for SdlWindow<GPU> {
+    fn request_redraw(&mut self) {
+        self.redraw_requested = true;
+    }
+
+    fn request_close(&mut self) {
+        self.close_requested = true;
+    }
+
+    fn take_redraw_request(&mut self) -> bool {
+        std::mem::take(&mut self.redraw_requested)
+    }
+
+    fn take_close_request(&mut self) -> bool {
+        std::mem::take(&mut self.close_requested)
+    }
+
     fn get_id(&self) -> Result<WindowId, WindowError> {
         let value = unsafe { sys::video::SDL_GetWindowID(self.owner.raw.as_ptr()) };
         if value.0 == 0 {
@@ -1024,10 +1064,10 @@ impl<H: WindowHandler<SdlWgpuWindow>> SdlWindowWithHandler<SdlWgpuWindow, H> {
     pub fn window_event(&mut self, event: &WindowEvent) -> Result<(), WindowError> {
         let Self { handler, window } = self;
         let result = (|| {
+            if !window.apply_event_requests(event)? {
+                return Ok(());
+            }
             if let WindowEventKind::WindowPixelSizeChanged { width, height } = &event.kind {
-                if event.window_id != window.get_id()? {
-                    return Ok(());
-                }
                 let width =
                     u32::try_from(*width).map_err(|error| WindowError::Nul(error.to_string()))?;
                 let height =

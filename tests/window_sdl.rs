@@ -398,3 +398,112 @@ fn releases_handler_when_initialization_fails() -> Result<(), WindowError> {
     assert!(dropped.get());
     Ok(())
 }
+
+#[test]
+fn merges_requests_and_routes_only_matching_window_events() -> Result<(), WindowError> {
+    let sdl_inst = sdl::init()?;
+    let mut window = sdl_inst.create_window(
+        Handler::default(),
+        WindowOptions {
+            x: 0,
+            y: 0,
+            title: "requests",
+            width: 320,
+            height: 240,
+            flags: WindowFlags::HIDDEN,
+        },
+    )?;
+    let id = window.window.get_id()?;
+    let native: &mut dyn Window = &mut window.window;
+    assert!(native.take_redraw_request());
+    assert!(!native.take_redraw_request());
+    assert!(!native.take_close_request());
+    native.request_redraw();
+    native.request_redraw();
+    native.request_close();
+    native.request_close();
+    assert!(native.take_redraw_request());
+    assert!(!native.take_redraw_request());
+    assert!(native.take_close_request());
+    assert!(!native.take_close_request());
+
+    let mut event = WindowEvent {
+        timestamp: 0,
+        window_id: WindowId(0),
+        kind: WindowEventKind::WindowCloseRequested,
+    };
+    window.window_event(&event)?;
+    assert!(!window.window.take_close_request());
+    assert!(!window.window.take_redraw_request());
+    assert_eq!(window.handler.calls, ["init"]);
+    event.window_id = id;
+    window.window_event(&event)?;
+    assert!(window.window.take_close_request());
+    assert!(!window.window.take_close_request());
+    event.kind = WindowEventKind::WindowExposed { live_resize: false };
+    window.window_event(&event)?;
+    assert!(window.window.take_redraw_request());
+    assert!(!window.window.take_redraw_request());
+    assert_eq!(window.handler.calls, ["init", "event", "event"]);
+    Ok(())
+}
+
+#[test]
+fn handler_requests_survive_rendering_and_can_retry_a_skipped_frame() -> Result<(), WindowError> {
+    #[derive(Default)]
+    struct RequestHandler {
+        fail_render: bool,
+    }
+
+    impl WindowHandler<sdl::SdlWindow> for RequestHandler {
+        fn update(&mut self, window: &mut sdl::SdlWindow) -> Result<(), WindowError> {
+            window.request_close();
+            window.request_redraw();
+            Ok(())
+        }
+
+        fn render(&mut self, window: &mut sdl::SdlWindow) -> Result<(), WindowError> {
+            if self.fail_render {
+                Err(WindowError::Unknown)
+            } else {
+                window.request_redraw();
+                Ok(())
+            }
+        }
+
+        fn error(&mut self, _: WindowError) -> Result<(), WindowError> {
+            Ok(())
+        }
+    }
+
+    let sdl_inst = sdl::init()?;
+    let mut window = sdl_inst.create_window(
+        RequestHandler::default(),
+        WindowOptions {
+            x: 0,
+            y: 0,
+            title: "handler requests",
+            width: 320,
+            height: 240,
+            flags: WindowFlags::HIDDEN,
+        },
+    )?;
+    assert!(window.window.take_redraw_request());
+    window.update()?;
+    assert!(window.window.take_close_request());
+    assert!(!window.window.take_close_request());
+    assert!(window.window.take_redraw_request());
+    assert!(window.render()?);
+    assert!(window.window.take_redraw_request());
+    assert!(!window.window.take_redraw_request());
+
+    window.handler.fail_render = true;
+    window.window.request_redraw();
+    assert!(window.window.take_redraw_request());
+    if !window.render()? {
+        window.window.request_redraw();
+    }
+    assert!(window.window.take_redraw_request());
+    assert!(!window.window.take_redraw_request());
+    Ok(())
+}
