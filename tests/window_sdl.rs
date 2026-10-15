@@ -1,5 +1,5 @@
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     rc::Rc,
     thread,
     time::{Duration, Instant},
@@ -12,17 +12,17 @@ use cxstd::window::{
 
 #[derive(Default)]
 struct Handler {
-    calls: Vec<&'static str>,
+    calls: Rc<RefCell<Vec<&'static str>>>,
 }
 
 impl WindowHandler<sdl::SdlWindow> for Handler {
     fn init(&mut self, _window: &mut sdl::SdlWindow) -> Result<(), WindowError> {
-        self.calls.push("init");
+        self.calls.borrow_mut().push("init");
         Ok(())
     }
 
     fn update(&mut self, _window: &mut sdl::SdlWindow) -> Result<(), WindowError> {
-        self.calls.push("update");
+        self.calls.borrow_mut().push("update");
         Ok(())
     }
 
@@ -31,17 +31,17 @@ impl WindowHandler<sdl::SdlWindow> for Handler {
         _window: &mut sdl::SdlWindow,
         _event: &WindowEvent,
     ) -> Result<(), WindowError> {
-        self.calls.push("event");
+        self.calls.borrow_mut().push("event");
         Ok(())
     }
 
     fn render(&mut self, _window: &mut sdl::SdlWindow) -> Result<(), WindowError> {
-        self.calls.push("render");
+        self.calls.borrow_mut().push("render");
         Ok(())
     }
 
     fn frame_ready(&mut self, _window: &mut sdl::SdlWindow) -> Result<(), WindowError> {
-        self.calls.push("frame_ready");
+        self.calls.borrow_mut().push("frame_ready");
         Ok(())
     }
 }
@@ -66,7 +66,7 @@ fn creates_window() -> Result<(), WindowError> {
             flags: WindowFlags::HIDDEN,
         },
     )?;
-    let window: &dyn Window = &window.window;
+    let window: &dyn Window = &*window;
     assert_ne!(window.get_id()?, WindowId(0));
     assert_eq!(window.get_size()?, (320, 240));
     assert_eq!(window.get_position()?, (40, 60));
@@ -108,13 +108,13 @@ fn updates_title_and_rejects_nul_update() -> Result<(), WindowError> {
             flags: WindowFlags::HIDDEN,
         },
     )?;
-    window.window.set_title("updated")?;
-    assert_eq!(window.window.get_title(), "updated");
+    window.set_title("updated")?;
+    assert_eq!(window.get_title(), "updated");
     assert!(matches!(
-        window.window.set_title("invalid\0title"),
+        window.set_title("invalid\0title"),
         Err(WindowError::Nul(_))
     ));
-    assert_eq!(window.window.get_title(), "updated");
+    assert_eq!(window.get_title(), "updated");
     Ok(())
 }
 
@@ -132,11 +132,11 @@ fn sets_system_cursors_and_controls_text_input() -> Result<(), WindowError> {
             flags: WindowFlags::HIDDEN,
         },
     )?;
-    window.window.set_cursor(WindowSystemCursor::Text)?;
-    window.window.set_cursor(WindowSystemCursor::Text)?;
-    window.window.set_cursor(WindowSystemCursor::Default)?;
-    window.window.start_text_input()?;
-    window.window.stop_text_input()?;
+    window.set_cursor(WindowSystemCursor::Text)?;
+    window.set_cursor(WindowSystemCursor::Text)?;
+    window.set_cursor(WindowSystemCursor::Default)?;
+    window.start_text_input()?;
+    window.stop_text_input()?;
     Ok(())
 }
 
@@ -155,8 +155,8 @@ fn handle_provider_keeps_the_native_window_and_context_alive() -> Result<(), Win
             flags: WindowFlags::HIDDEN,
         },
     )?;
-    let expected = window.window.window_handle()?.as_raw();
-    let provider = window.window.window_handle_provider();
+    let expected = window.window_handle()?.as_raw();
+    let provider = window.window_handle_provider();
     drop(window);
     drop(sdl_inst);
     assert_eq!(
@@ -215,7 +215,7 @@ fn releases_replaced_and_destroyed_hit_test_callbacks() -> Result<(), WindowErro
     let dropped = Rc::new(Cell::new(0));
     for expected in 0..2 {
         let counter = DropCounter(Rc::clone(&dropped));
-        let _ = window.window.set_hit_test(move |_x, _y| {
+        let _ = window.set_hit_test(move |_x, _y| {
             let _counter = &counter;
             WindowHitTestResult::Normal
         });
@@ -242,11 +242,11 @@ fn exposes_native_handles() -> Result<(), WindowError> {
         },
     )?;
     assert!(matches!(
-        window.window.display_handle()?.as_raw(),
+        window.display_handle()?.as_raw(),
         raw_window_handle::RawDisplayHandle::Windows(_)
     ));
     assert!(matches!(
-        window.window.window_handle()?.as_raw(),
+        window.window_handle()?.as_raw(),
         raw_window_handle::RawWindowHandle::Win32(_)
     ));
     Ok(())
@@ -324,8 +324,11 @@ fn reinitializes_after_window_drop() -> Result<(), WindowError> {
 #[test]
 fn owns_and_dispatches_native_handler() -> Result<(), WindowError> {
     let sdl_inst = sdl::init()?;
+    let calls = Rc::new(RefCell::new(Vec::new()));
     let mut window = sdl_inst.create_window(
-        Handler::default(),
+        Handler {
+            calls: Rc::clone(&calls),
+        },
         WindowOptions {
             x: 0,
             y: 0,
@@ -335,17 +338,17 @@ fn owns_and_dispatches_native_handler() -> Result<(), WindowError> {
             flags: WindowFlags::HIDDEN,
         },
     )?;
-    assert_eq!(window.handler.calls, ["init"]);
+    assert_eq!(*calls.borrow(), ["init"]);
     window.update()?;
     let event = WindowEvent {
         timestamp: 0,
-        window_id: window.window.get_id()?,
+        window_id: window.get_id()?,
         kind: WindowEventKind::WindowExposed { live_resize: false },
     };
     window.window_event(&event)?;
     assert!(window.render()?);
     assert_eq!(
-        window.handler.calls,
+        *calls.borrow(),
         ["init", "update", "event", "render", "frame_ready"]
     );
     Ok(())
@@ -402,8 +405,11 @@ fn releases_handler_when_initialization_fails() -> Result<(), WindowError> {
 #[test]
 fn merges_requests_and_routes_only_matching_window_events() -> Result<(), WindowError> {
     let sdl_inst = sdl::init()?;
+    let calls = Rc::new(RefCell::new(Vec::new()));
     let mut window = sdl_inst.create_window(
-        Handler::default(),
+        Handler {
+            calls: Rc::clone(&calls),
+        },
         WindowOptions {
             x: 0,
             y: 0,
@@ -413,8 +419,8 @@ fn merges_requests_and_routes_only_matching_window_events() -> Result<(), Window
             flags: WindowFlags::HIDDEN,
         },
     )?;
-    let id = window.window.get_id()?;
-    let native: &mut dyn Window = &mut window.window;
+    let id = window.get_id()?;
+    let native: &mut dyn Window = &mut *window;
     assert!(native.take_redraw_request());
     assert!(!native.take_redraw_request());
     assert!(!native.take_close_request());
@@ -433,18 +439,18 @@ fn merges_requests_and_routes_only_matching_window_events() -> Result<(), Window
         kind: WindowEventKind::WindowCloseRequested,
     };
     window.window_event(&event)?;
-    assert!(!window.window.take_close_request());
-    assert!(!window.window.take_redraw_request());
-    assert_eq!(window.handler.calls, ["init"]);
+    assert!(!window.take_close_request());
+    assert!(!window.take_redraw_request());
+    assert_eq!(*calls.borrow(), ["init"]);
     event.window_id = id;
     window.window_event(&event)?;
-    assert!(window.window.take_close_request());
-    assert!(!window.window.take_close_request());
+    assert!(window.take_close_request());
+    assert!(!window.take_close_request());
     event.kind = WindowEventKind::WindowExposed { live_resize: false };
     window.window_event(&event)?;
-    assert!(window.window.take_redraw_request());
-    assert!(!window.window.take_redraw_request());
-    assert_eq!(window.handler.calls, ["init", "event", "event"]);
+    assert!(window.take_redraw_request());
+    assert!(!window.take_redraw_request());
+    assert_eq!(*calls.borrow(), ["init", "event", "event"]);
     Ok(())
 }
 
@@ -452,7 +458,7 @@ fn merges_requests_and_routes_only_matching_window_events() -> Result<(), Window
 fn handler_requests_survive_rendering_and_can_retry_a_skipped_frame() -> Result<(), WindowError> {
     #[derive(Default)]
     struct RequestHandler {
-        fail_render: bool,
+        fail_render: Rc<Cell<bool>>,
     }
 
     impl WindowHandler<sdl::SdlWindow> for RequestHandler {
@@ -463,7 +469,7 @@ fn handler_requests_survive_rendering_and_can_retry_a_skipped_frame() -> Result<
         }
 
         fn render(&mut self, window: &mut sdl::SdlWindow) -> Result<(), WindowError> {
-            if self.fail_render {
+            if self.fail_render.get() {
                 Err(WindowError::Unknown)
             } else {
                 window.request_redraw();
@@ -477,8 +483,11 @@ fn handler_requests_survive_rendering_and_can_retry_a_skipped_frame() -> Result<
     }
 
     let sdl_inst = sdl::init()?;
+    let fail_render = Rc::new(Cell::new(false));
     let mut window = sdl_inst.create_window(
-        RequestHandler::default(),
+        RequestHandler {
+            fail_render: Rc::clone(&fail_render),
+        },
         WindowOptions {
             x: 0,
             y: 0,
@@ -488,22 +497,22 @@ fn handler_requests_survive_rendering_and_can_retry_a_skipped_frame() -> Result<
             flags: WindowFlags::HIDDEN,
         },
     )?;
-    assert!(window.window.take_redraw_request());
+    assert!(window.take_redraw_request());
     window.update()?;
-    assert!(window.window.take_close_request());
-    assert!(!window.window.take_close_request());
-    assert!(window.window.take_redraw_request());
+    assert!(window.take_close_request());
+    assert!(!window.take_close_request());
+    assert!(window.take_redraw_request());
     assert!(window.render()?);
-    assert!(window.window.take_redraw_request());
-    assert!(!window.window.take_redraw_request());
+    assert!(window.take_redraw_request());
+    assert!(!window.take_redraw_request());
 
-    window.handler.fail_render = true;
-    window.window.request_redraw();
-    assert!(window.window.take_redraw_request());
+    fail_render.set(true);
+    window.request_redraw();
+    assert!(window.take_redraw_request());
     if !window.render()? {
-        window.window.request_redraw();
+        window.request_redraw();
     }
-    assert!(window.window.take_redraw_request());
-    assert!(!window.window.take_redraw_request());
+    assert!(window.take_redraw_request());
+    assert!(!window.take_redraw_request());
     Ok(())
 }

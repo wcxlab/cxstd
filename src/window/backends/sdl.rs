@@ -1,12 +1,12 @@
 //! `sdl_inst.create_wgpu_window(...)` pairs an owned SDL window with GPU presentation.
 //! `sdl_inst.create_window(handler, WindowOptions { .. })` owns a native handler.
 //! `sdl_inst.create_wgpu_window(handler, WindowOptions { .. })` owns a GPU handler.
-//! Both return `SdlWindowWithHandler<W, H>` and initialize the handler once.
+//! Both return `SdlWindowHost<W, H>` and initialize the handler once.
 //! `WindowHandler<W>` receives only the window; the handler is stored separately.
-//! Access native and GPU operations through `.window`, and application state through `.handler`.
+//! Native and GPU operations are available through `Deref` and `DerefMut`; the handler is private.
 //! Route events through `window.window_event(&event)`.
-//! Call `window.update()`; consume `.window.take_close_request()` and
-//! `.window.take_redraw_request()` in the host loop before rendering.
+//! Call `window.update()`; consume `window.take_close_request()` and
+//! `window.take_redraw_request()` in the host loop before rendering.
 //! Restore the redraw request when rendering is skipped; rendering never consumes requests.
 //! Frame access is limited to the render callback; frames and surfaces drop before the native window.
 
@@ -22,6 +22,7 @@ use std::{
     ffi::{CStr, CString, c_char, c_void},
     marker::PhantomData,
     mem::MaybeUninit,
+    ops::{Deref, DerefMut},
     ptr::NonNull,
     rc::Rc,
     sync::Mutex,
@@ -61,9 +62,23 @@ pub struct SdlWindow<const GPU: bool = false> {
 #[cfg(feature = "wgpu")]
 pub type SdlWgpuWindow = SdlWindow<true>;
 
-pub struct SdlWindowWithHandler<W, H> {
-    pub handler: H,
-    pub window: W,
+pub struct SdlWindowHost<W, H> {
+    handler: H,
+    window: W,
+}
+
+impl<W, H> Deref for SdlWindowHost<W, H> {
+    type Target = W;
+
+    fn deref(&self) -> &Self::Target {
+        &self.window
+    }
+}
+
+impl<W, H> DerefMut for SdlWindowHost<W, H> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.window
+    }
 }
 
 impl<const GPU: bool> SdlWindow<GPU> {
@@ -72,7 +87,7 @@ impl<const GPU: bool> SdlWindow<GPU> {
     }
 }
 
-impl<W: Window, H: WindowHandler<W>> SdlWindowWithHandler<W, H> {
+impl<W: Window, H: WindowHandler<W>> SdlWindowHost<W, H> {
     pub fn update(&mut self) -> Result<(), WindowError> {
         self.handler
             .update(&mut self.window)
@@ -80,7 +95,7 @@ impl<W: Window, H: WindowHandler<W>> SdlWindowWithHandler<W, H> {
     }
 }
 
-impl<W: Window, H: WindowHandler<W>> SdlWindowWithHandler<W, H> {
+impl<W: Window, H: WindowHandler<W>> SdlWindowHost<W, H> {
     fn new(window: W, handler: H) -> Result<Self, WindowError> {
         let mut window = Self { handler, window };
         window
@@ -91,7 +106,7 @@ impl<W: Window, H: WindowHandler<W>> SdlWindowWithHandler<W, H> {
     }
 }
 
-impl<H: WindowHandler<SdlWindow>> SdlWindowWithHandler<SdlWindow, H> {
+impl<H: WindowHandler<SdlWindow>> SdlWindowHost<SdlWindow, H> {
     pub fn window_event(&mut self, event: &WindowEvent) -> Result<(), WindowError> {
         let result = (|| {
             if !self.window.apply_event_requests(event)? {
@@ -181,9 +196,9 @@ impl SdlInstance {
         &self,
         handler: H,
         options: WindowOptions<'_>,
-    ) -> Result<SdlWindowWithHandler<SdlWindow, H>, WindowError> {
+    ) -> Result<SdlWindowHost<SdlWindow, H>, WindowError> {
         let window = self.create_native_window::<false>(options)?;
-        SdlWindowWithHandler::new(window, handler)
+        SdlWindowHost::new(window, handler)
     }
 }
 
@@ -1042,7 +1057,7 @@ impl SdlInstance {
         &self,
         handler: H,
         options: WindowOptions<'_>,
-    ) -> Result<SdlWindowWithHandler<SdlWgpuWindow, H>, WindowError> {
+    ) -> Result<SdlWindowHost<SdlWgpuWindow, H>, WindowError> {
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         let options = WindowOptions {
             flags: options.flags | WindowFlags::METAL,
@@ -1055,12 +1070,12 @@ impl SdlInstance {
         };
         let mut window = self.create_native_window::<true>(options)?;
         window.gpu = Some(WgpuContext::new(&window)?);
-        SdlWindowWithHandler::new(window, handler)
+        SdlWindowHost::new(window, handler)
     }
 }
 
 #[cfg(feature = "wgpu")]
-impl<H: WindowHandler<SdlWgpuWindow>> SdlWindowWithHandler<SdlWgpuWindow, H> {
+impl<H: WindowHandler<SdlWgpuWindow>> SdlWindowHost<SdlWgpuWindow, H> {
     pub fn window_event(&mut self, event: &WindowEvent) -> Result<(), WindowError> {
         let Self { handler, window } = self;
         let result = (|| {
