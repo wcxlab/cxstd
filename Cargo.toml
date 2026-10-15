@@ -2,15 +2,22 @@
 name = "cxstd"
 version = "0.2.0"
 edition = "2024"
-description = "Shared window interfaces and types based on winit."
+description = "Shared window interfaces with an optional SDL3 backend."
 license = "Apache-2.0"
 repository = "https://github.com/wcxlab/cxstd"
 
+[features]
+sdl = ["dep:sdl3-sys"]
+
 [dependencies]
-anyhow = "1"
+bitflags = "2"
 raw-window-handle = "0.6"
+sdl3-sys = { version = "0.7.2", default-features = false, optional = true, features = ["build-from-source-static"] }
 thiserror = "2"
-winit = "0.30"
+
+[[test]]
+name = "window_sdl"
+required-features = ["sdl"]
 
 [workspace]
 resolver = "3"
