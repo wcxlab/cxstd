@@ -63,6 +63,27 @@ pub struct WindowPropertiesId(pub u32);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct WindowPixelFormat(pub i32);
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum WindowSystemTheme {
+    #[default]
+    Unknown,
+    Light,
+    Dark,
+}
+
+/// Display mode values owned by an event, without SDL's internal mode pointer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowDisplayModeSnapshot {
+    pub display_id: WindowDisplayId,
+    pub format: WindowPixelFormat,
+    pub width: i32,
+    pub height: i32,
+    pub pixel_density: f32,
+    pub refresh_rate: f32,
+    pub refresh_rate_numerator: i32,
+    pub refresh_rate_denominator: i32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WindowDisplayMode {
     pub display_id: WindowDisplayId,

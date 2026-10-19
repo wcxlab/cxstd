@@ -1,4 +1,7 @@
-use super::{WindowDisplayId, WindowDisplayOrientation, WindowId};
+use super::{
+    WindowDisplayId, WindowDisplayModeSnapshot, WindowDisplayOrientation, WindowId, WindowRect,
+    WindowSystemTheme,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct WindowKeyboardId(pub u32);
@@ -321,7 +324,9 @@ pub enum WindowEventKind {
     WillEnterForeground,
     DidEnterForeground,
     LocaleChanged,
-    SystemThemeChanged,
+    SystemThemeChanged {
+        theme: WindowSystemTheme,
+    },
     DisplayOrientation {
         display_id: WindowDisplayId,
         orientation: WindowDisplayOrientation,
@@ -334,22 +339,23 @@ pub enum WindowEventKind {
     },
     DisplayMoved {
         display_id: WindowDisplayId,
+        bounds: WindowRect,
     },
     DisplayDesktopModeChanged {
         display_id: WindowDisplayId,
-        width: i32,
-        height: i32,
+        mode: WindowDisplayModeSnapshot,
     },
     DisplayCurrentModeChanged {
         display_id: WindowDisplayId,
-        width: i32,
-        height: i32,
+        mode: WindowDisplayModeSnapshot,
     },
     DisplayContentScaleChanged {
         display_id: WindowDisplayId,
+        content_scale: f32,
     },
     DisplayUsableBoundsChanged {
         display_id: WindowDisplayId,
+        bounds: WindowRect,
     },
     WindowShown,
     WindowHidden,
@@ -369,7 +375,10 @@ pub enum WindowEventKind {
         height: i32,
         pixel_density: f32,
     },
-    WindowMetalViewResized,
+    WindowMetalViewResized {
+        width: i32,
+        height: i32,
+    },
     WindowMinimized,
     WindowMaximized,
     WindowRestored,
@@ -390,12 +399,18 @@ pub enum WindowEventKind {
         display_scale: f32,
         pixel_density: f32,
     },
-    WindowSafeAreaChanged,
+    WindowSafeAreaChanged {
+        safe_area: WindowRect,
+    },
     WindowOccluded,
     WindowEnterFullscreen,
     WindowLeaveFullscreen,
     WindowDestroyed,
-    WindowHdrStateChanged,
+    WindowHdrStateChanged {
+        enabled: bool,
+        sdr_white_level: f32,
+        hdr_headroom: f32,
+    },
     KeyDown(WindowKeyboardEvent),
     KeyUp(WindowKeyboardEvent),
     TextEditing(WindowTextEditingEvent),

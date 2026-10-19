@@ -1466,6 +1466,31 @@ mod conversions {
         }
     }
 
+    impl From<&sys::video::SDL_DisplayMode> for WindowDisplayModeSnapshot {
+        fn from(value: &sys::video::SDL_DisplayMode) -> Self {
+            Self {
+                display_id: value.displayID.into(),
+                format: value.format.into(),
+                width: value.w,
+                height: value.h,
+                pixel_density: value.pixel_density,
+                refresh_rate: value.refresh_rate,
+                refresh_rate_numerator: value.refresh_rate_numerator,
+                refresh_rate_denominator: value.refresh_rate_denominator,
+            }
+        }
+    }
+
+    impl From<sys::video::SDL_SystemTheme> for WindowSystemTheme {
+        fn from(value: sys::video::SDL_SystemTheme) -> Self {
+            match value {
+                sys::video::SDL_SYSTEM_THEME_LIGHT => Self::Light,
+                sys::video::SDL_SYSTEM_THEME_DARK => Self::Dark,
+                _ => Self::Unknown,
+            }
+        }
+    }
+
     impl From<sys::video::SDL_DisplayOrientation> for WindowDisplayOrientation {
         fn from(value: sys::video::SDL_DisplayOrientation) -> Self {
             match value {
@@ -2091,7 +2116,8 @@ mod conversions {
         /// # Safety
         /// The tag must identify an initialized SDL event payload.
         /// Referenced strings and counted arrays must be valid for reading during this call.
-        /// Scale-dependent window events require initialized SDL on its video thread.
+        /// State-dependent events require initialized SDL on its video thread.
+        /// Events whose required window or display state cannot be queried return None.
         pub unsafe fn from_sdl(value: &sys::events::SDL_Event) -> Option<Self> {
             let event_type = sys::events::SDL_EventType(unsafe { value.r#type });
             let timestamp = unsafe { value.common.timestamp };
@@ -2114,9 +2140,12 @@ mod conversions {
                 sys::events::SDL_EVENT_LOCALE_CHANGED => {
                     (WindowId(0), WindowEventKind::LocaleChanged)
                 }
-                sys::events::SDL_EVENT_SYSTEM_THEME_CHANGED => {
-                    (WindowId(0), WindowEventKind::SystemThemeChanged)
-                }
+                sys::events::SDL_EVENT_SYSTEM_THEME_CHANGED => (
+                    WindowId(0),
+                    WindowEventKind::SystemThemeChanged {
+                        theme: unsafe { sys::video::SDL_GetSystemTheme() }.into(),
+                    },
+                ),
                 sys::events::SDL_EVENT_DISPLAY_ORIENTATION => (
                     WindowId(0),
                     WindowEventKind::DisplayOrientation {
@@ -2139,40 +2168,67 @@ mod conversions {
                         display_id: unsafe { value.display.displayID }.into(),
                     },
                 ),
-                sys::events::SDL_EVENT_DISPLAY_MOVED => (
-                    WindowId(0),
-                    WindowEventKind::DisplayMoved {
-                        display_id: unsafe { value.display.displayID }.into(),
-                    },
-                ),
-                sys::events::SDL_EVENT_DISPLAY_DESKTOP_MODE_CHANGED => (
-                    WindowId(0),
-                    WindowEventKind::DisplayDesktopModeChanged {
-                        display_id: unsafe { value.display.displayID }.into(),
-                        width: unsafe { value.display.data1 },
-                        height: unsafe { value.display.data2 },
-                    },
-                ),
-                sys::events::SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED => (
-                    WindowId(0),
-                    WindowEventKind::DisplayCurrentModeChanged {
-                        display_id: unsafe { value.display.displayID }.into(),
-                        width: unsafe { value.display.data1 },
-                        height: unsafe { value.display.data2 },
-                    },
-                ),
-                sys::events::SDL_EVENT_DISPLAY_CONTENT_SCALE_CHANGED => (
-                    WindowId(0),
-                    WindowEventKind::DisplayContentScaleChanged {
-                        display_id: unsafe { value.display.displayID }.into(),
-                    },
-                ),
-                sys::events::SDL_EVENT_DISPLAY_USABLE_BOUNDS_CHANGED => (
-                    WindowId(0),
-                    WindowEventKind::DisplayUsableBoundsChanged {
-                        display_id: unsafe { value.display.displayID }.into(),
-                    },
-                ),
+                sys::events::SDL_EVENT_DISPLAY_MOVED => {
+                    let id = unsafe { value.display.displayID };
+                    let bounds =
+                        query_rect(|rect| unsafe { sys::video::SDL_GetDisplayBounds(id, rect) })?;
+                    (
+                        WindowId(0),
+                        WindowEventKind::DisplayMoved {
+                            display_id: id.into(),
+                            bounds,
+                        },
+                    )
+                }
+                sys::events::SDL_EVENT_DISPLAY_DESKTOP_MODE_CHANGED => {
+                    let id = unsafe { value.display.displayID };
+                    let mode = unsafe { sys::video::SDL_GetDesktopDisplayMode(id).as_ref() }?;
+                    (
+                        WindowId(0),
+                        WindowEventKind::DisplayDesktopModeChanged {
+                            display_id: id.into(),
+                            mode: mode.into(),
+                        },
+                    )
+                }
+                sys::events::SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED => {
+                    let id = unsafe { value.display.displayID };
+                    let mode = unsafe { sys::video::SDL_GetCurrentDisplayMode(id).as_ref() }?;
+                    (
+                        WindowId(0),
+                        WindowEventKind::DisplayCurrentModeChanged {
+                            display_id: id.into(),
+                            mode: mode.into(),
+                        },
+                    )
+                }
+                sys::events::SDL_EVENT_DISPLAY_CONTENT_SCALE_CHANGED => {
+                    let id = unsafe { value.display.displayID };
+                    let content_scale = unsafe { sys::video::SDL_GetDisplayContentScale(id) };
+                    if content_scale <= 0.0 {
+                        return None;
+                    }
+                    (
+                        WindowId(0),
+                        WindowEventKind::DisplayContentScaleChanged {
+                            display_id: id.into(),
+                            content_scale,
+                        },
+                    )
+                }
+                sys::events::SDL_EVENT_DISPLAY_USABLE_BOUNDS_CHANGED => {
+                    let id = unsafe { value.display.displayID };
+                    let bounds = query_rect(|rect| unsafe {
+                        sys::video::SDL_GetDisplayUsableBounds(id, rect)
+                    })?;
+                    (
+                        WindowId(0),
+                        WindowEventKind::DisplayUsableBoundsChanged {
+                            display_id: id.into(),
+                            bounds,
+                        },
+                    )
+                }
                 sys::events::SDL_EVENT_KEY_DOWN => (
                     unsafe { value.key.windowID }.into(),
                     WindowEventKind::KeyDown(unsafe { value.key }.into()),
@@ -2501,10 +2557,24 @@ mod conversions {
                         }
                     })
                 }
-                sys::events::SDL_EVENT_WINDOW_METAL_VIEW_RESIZED => (
-                    unsafe { value.window.windowID }.into(),
-                    WindowEventKind::WindowMetalViewResized,
-                ),
+                sys::events::SDL_EVENT_WINDOW_METAL_VIEW_RESIZED => {
+                    let id = unsafe { value.window.windowID };
+                    let window = window_pointer(id)?;
+                    let (mut width, mut height) = (0, 0);
+                    if !unsafe {
+                        sys::video::SDL_GetWindowSizeInPixels(
+                            window.as_ptr(),
+                            &mut width,
+                            &mut height,
+                        )
+                    } {
+                        return None;
+                    }
+                    (
+                        id.into(),
+                        WindowEventKind::WindowMetalViewResized { width, height },
+                    )
+                }
                 sys::events::SDL_EVENT_WINDOW_MINIMIZED => (
                     unsafe { value.window.windowID }.into(),
                     WindowEventKind::WindowMinimized,
@@ -2569,10 +2639,17 @@ mod conversions {
                         },
                     )
                 }
-                sys::events::SDL_EVENT_WINDOW_SAFE_AREA_CHANGED => (
-                    unsafe { value.window.windowID }.into(),
-                    WindowEventKind::WindowSafeAreaChanged,
-                ),
+                sys::events::SDL_EVENT_WINDOW_SAFE_AREA_CHANGED => {
+                    let id = unsafe { value.window.windowID };
+                    let window = window_pointer(id)?;
+                    let safe_area = query_rect(|rect| unsafe {
+                        sys::video::SDL_GetWindowSafeArea(window.as_ptr(), rect)
+                    })?;
+                    (
+                        id.into(),
+                        WindowEventKind::WindowSafeAreaChanged { safe_area },
+                    )
+                }
                 sys::events::SDL_EVENT_WINDOW_OCCLUDED => (
                     unsafe { value.window.windowID }.into(),
                     WindowEventKind::WindowOccluded,
@@ -2589,10 +2666,44 @@ mod conversions {
                     unsafe { value.window.windowID }.into(),
                     WindowEventKind::WindowDestroyed,
                 ),
-                sys::events::SDL_EVENT_WINDOW_HDR_STATE_CHANGED => (
-                    unsafe { value.window.windowID }.into(),
-                    WindowEventKind::WindowHdrStateChanged,
-                ),
+                sys::events::SDL_EVENT_WINDOW_HDR_STATE_CHANGED => {
+                    let id = unsafe { value.window.windowID };
+                    let window = window_pointer(id)?;
+                    let properties =
+                        unsafe { sys::video::SDL_GetWindowProperties(window.as_ptr()) };
+                    if properties.0 == 0 {
+                        return None;
+                    }
+                    let enabled = unsafe {
+                        sys::properties::SDL_GetBooleanProperty(
+                            properties,
+                            sys::video::SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN,
+                            false,
+                        )
+                    };
+                    let sdr_white_level = unsafe {
+                        sys::properties::SDL_GetFloatProperty(
+                            properties,
+                            sys::video::SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT,
+                            1.0,
+                        )
+                    };
+                    let hdr_headroom = unsafe {
+                        sys::properties::SDL_GetFloatProperty(
+                            properties,
+                            sys::video::SDL_PROP_WINDOW_HDR_HEADROOM_FLOAT,
+                            1.0,
+                        )
+                    };
+                    (
+                        id.into(),
+                        WindowEventKind::WindowHdrStateChanged {
+                            enabled,
+                            sdr_white_level,
+                            hdr_headroom,
+                        },
+                    )
+                }
                 _ => return None,
             };
             Some(Self {
@@ -2630,13 +2741,24 @@ mod conversions {
         }
     }
 
+    fn window_pointer(id: sys::video::SDL_WindowID) -> Option<NonNull<sys::video::SDL_Window>> {
+        NonNull::new(unsafe { sys::video::SDL_GetWindowFromID(id) })
+    }
+
+    fn query_rect(query: impl FnOnce(*mut sys::rect::SDL_Rect) -> bool) -> Option<WindowRect> {
+        let mut rect = sys::rect::SDL_Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        };
+        query(&mut rect).then(|| rect.into())
+    }
+
     fn window_scales(id: sys::video::SDL_WindowID) -> Option<(f32, f32)> {
-        let window = unsafe { sys::video::SDL_GetWindowFromID(id) };
-        if window.is_null() {
-            return None;
-        }
-        let pixel_density = unsafe { sys::video::SDL_GetWindowPixelDensity(window) };
-        let display_scale = unsafe { sys::video::SDL_GetWindowDisplayScale(window) };
+        let window = window_pointer(id)?;
+        let pixel_density = unsafe { sys::video::SDL_GetWindowPixelDensity(window.as_ptr()) };
+        let display_scale = unsafe { sys::video::SDL_GetWindowDisplayScale(window.as_ptr()) };
         (pixel_density > 0.0 && display_scale > 0.0).then_some((pixel_density, display_scale))
     }
 
@@ -2655,7 +2777,7 @@ mod conversions {
         use super::*;
 
         #[test]
-        fn snapshots_window_scales_and_ignores_destroyed_windows() -> Result<(), WindowError> {
+        fn snapshots_window_state_and_ignores_destroyed_windows() -> Result<(), WindowError> {
             let instance = init()?;
             let window = instance.create_native_window::<false>(WindowOptions {
                 title: "window scale event test",
@@ -2668,7 +2790,48 @@ mod conversions {
             let window_id = window.get_id()?;
             let pixel_density = window.get_pixel_density()?;
             let display_scale = window.get_display_scale()?;
+            let (width, height) = window.get_size_in_pixels()?;
+            let properties = sys::properties::SDL_PropertiesID(window.get_properties()?.0);
+            assert!(unsafe {
+                sys::properties::SDL_SetBooleanProperty(
+                    properties,
+                    sys::video::SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN,
+                    true,
+                )
+            });
+            assert!(unsafe {
+                sys::properties::SDL_SetFloatProperty(
+                    properties,
+                    sys::video::SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT,
+                    1.5,
+                )
+            });
+            assert!(unsafe {
+                sys::properties::SDL_SetFloatProperty(
+                    properties,
+                    sys::video::SDL_PROP_WINDOW_HDR_HEADROOM_FLOAT,
+                    4.0,
+                )
+            });
             for (event_type, expected) in [
+                (
+                    sys::events::SDL_EVENT_WINDOW_SAFE_AREA_CHANGED,
+                    WindowEventKind::WindowSafeAreaChanged {
+                        safe_area: window.get_safe_area()?,
+                    },
+                ),
+                (
+                    sys::events::SDL_EVENT_WINDOW_METAL_VIEW_RESIZED,
+                    WindowEventKind::WindowMetalViewResized { width, height },
+                ),
+                (
+                    sys::events::SDL_EVENT_WINDOW_HDR_STATE_CHANGED,
+                    WindowEventKind::WindowHdrStateChanged {
+                        enabled: true,
+                        sdr_white_level: 1.5,
+                        hdr_headroom: 4.0,
+                    },
+                ),
                 (
                     sys::events::SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,
                     WindowEventKind::WindowPixelSizeChanged {
@@ -2699,11 +2862,33 @@ mod conversions {
                 assert_eq!(event.timestamp, 123);
                 assert_eq!(event.window_id, window_id);
                 assert_eq!(event.kind, expected);
+                if event_type == sys::events::SDL_EVENT_WINDOW_HDR_STATE_CHANGED {
+                    assert!(unsafe {
+                        sys::properties::SDL_SetFloatProperty(
+                            properties,
+                            sys::video::SDL_PROP_WINDOW_HDR_HEADROOM_FLOAT,
+                            2.0,
+                        )
+                    });
+                    assert_eq!(event.kind, expected);
+                    let updated = unsafe { WindowEvent::from_sdl(&raw) }.unwrap();
+                    assert_eq!(
+                        updated.kind,
+                        WindowEventKind::WindowHdrStateChanged {
+                            enabled: true,
+                            sdr_white_level: 1.5,
+                            hdr_headroom: 2.0
+                        }
+                    );
+                }
             }
             drop(window);
             for event_type in [
                 sys::events::SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,
                 sys::events::SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED,
+                sys::events::SDL_EVENT_WINDOW_SAFE_AREA_CHANGED,
+                sys::events::SDL_EVENT_WINDOW_METAL_VIEW_RESIZED,
+                sys::events::SDL_EVENT_WINDOW_HDR_STATE_CHANGED,
             ] {
                 let raw = sys::events::SDL_Event {
                     window: sys::events::SDL_WindowEvent {
@@ -2714,6 +2899,93 @@ mod conversions {
                 };
                 assert!(unsafe { WindowEvent::from_sdl(&raw) }.is_none());
             }
+            Ok(())
+        }
+
+        #[test]
+        fn snapshots_display_state_and_ignores_invalid_displays() -> Result<(), WindowError> {
+            let _instance = init()?;
+            let id = unsafe { sys::video::SDL_GetPrimaryDisplay() };
+            assert_ne!(id.0, 0);
+            let bounds =
+                query_rect(|rect| unsafe { sys::video::SDL_GetDisplayBounds(id, rect) }).unwrap();
+            let usable_bounds =
+                query_rect(|rect| unsafe { sys::video::SDL_GetDisplayUsableBounds(id, rect) })
+                    .unwrap();
+            let desktop = unsafe { sys::video::SDL_GetDesktopDisplayMode(id).as_ref() }.unwrap();
+            let current = unsafe { sys::video::SDL_GetCurrentDisplayMode(id).as_ref() }.unwrap();
+            let cases = [
+                (
+                    sys::events::SDL_EVENT_DISPLAY_MOVED,
+                    WindowEventKind::DisplayMoved {
+                        display_id: id.into(),
+                        bounds,
+                    },
+                ),
+                (
+                    sys::events::SDL_EVENT_DISPLAY_USABLE_BOUNDS_CHANGED,
+                    WindowEventKind::DisplayUsableBoundsChanged {
+                        display_id: id.into(),
+                        bounds: usable_bounds,
+                    },
+                ),
+                (
+                    sys::events::SDL_EVENT_DISPLAY_CONTENT_SCALE_CHANGED,
+                    WindowEventKind::DisplayContentScaleChanged {
+                        display_id: id.into(),
+                        content_scale: unsafe { sys::video::SDL_GetDisplayContentScale(id) },
+                    },
+                ),
+                (
+                    sys::events::SDL_EVENT_DISPLAY_DESKTOP_MODE_CHANGED,
+                    WindowEventKind::DisplayDesktopModeChanged {
+                        display_id: id.into(),
+                        mode: desktop.into(),
+                    },
+                ),
+                (
+                    sys::events::SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED,
+                    WindowEventKind::DisplayCurrentModeChanged {
+                        display_id: id.into(),
+                        mode: current.into(),
+                    },
+                ),
+            ];
+            for (event_type, expected) in cases {
+                let mut raw = sys::events::SDL_Event {
+                    display: sys::events::SDL_DisplayEvent {
+                        r#type: event_type,
+                        timestamp: 456,
+                        displayID: id,
+                        data1: -1,
+                        data2: -2,
+                        ..Default::default()
+                    },
+                };
+                let event = unsafe { WindowEvent::from_sdl(&raw) }.unwrap();
+                assert_eq!(event.timestamp, 456);
+                assert_eq!(event.window_id, WindowId(0));
+                assert_eq!(event.kind, expected);
+                raw.display.displayID = sys::video::SDL_DisplayID(u32::MAX);
+                assert!(unsafe { WindowEvent::from_sdl(&raw) }.is_none());
+            }
+            let raw = sys::events::SDL_Event {
+                common: sys::events::SDL_CommonEvent {
+                    r#type: sys::events::SDL_EVENT_SYSTEM_THEME_CHANGED.0,
+                    timestamp: 789,
+                    ..Default::default()
+                },
+            };
+            assert_eq!(
+                unsafe { WindowEvent::from_sdl(&raw) }.unwrap(),
+                WindowEvent {
+                    timestamp: 789,
+                    window_id: WindowId(0),
+                    kind: WindowEventKind::SystemThemeChanged {
+                        theme: unsafe { sys::video::SDL_GetSystemTheme() }.into()
+                    }
+                }
+            );
             Ok(())
         }
 
@@ -2796,26 +3068,6 @@ mod conversions {
                     },
                 ),
                 (
-                    sys::events::SDL_EVENT_DISPLAY_DESKTOP_MODE_CHANGED,
-                    2560,
-                    1440,
-                    WindowEventKind::DisplayDesktopModeChanged {
-                        display_id: WindowDisplayId(27),
-                        width: 2560,
-                        height: 1440,
-                    },
-                ),
-                (
-                    sys::events::SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED,
-                    1920,
-                    1080,
-                    WindowEventKind::DisplayCurrentModeChanged {
-                        display_id: WindowDisplayId(27),
-                        width: 1920,
-                        height: 1080,
-                    },
-                ),
-                (
                     sys::events::SDL_EVENT_DISPLAY_ADDED,
                     0,
                     0,
@@ -2828,30 +3080,6 @@ mod conversions {
                     0,
                     0,
                     WindowEventKind::DisplayRemoved {
-                        display_id: WindowDisplayId(27),
-                    },
-                ),
-                (
-                    sys::events::SDL_EVENT_DISPLAY_MOVED,
-                    0,
-                    0,
-                    WindowEventKind::DisplayMoved {
-                        display_id: WindowDisplayId(27),
-                    },
-                ),
-                (
-                    sys::events::SDL_EVENT_DISPLAY_CONTENT_SCALE_CHANGED,
-                    0,
-                    0,
-                    WindowEventKind::DisplayContentScaleChanged {
-                        display_id: WindowDisplayId(27),
-                    },
-                ),
-                (
-                    sys::events::SDL_EVENT_DISPLAY_USABLE_BOUNDS_CHANGED,
-                    0,
-                    0,
-                    WindowEventKind::DisplayUsableBoundsChanged {
                         display_id: WindowDisplayId(27),
                     },
                 ),
