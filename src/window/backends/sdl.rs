@@ -1082,7 +1082,7 @@ impl<H: WindowHandler<SdlWgpuWindow>> SdlWindowHost<SdlWgpuWindow, H> {
             if !window.apply_event_requests(event)? {
                 return Ok(());
             }
-            if let WindowEventKind::WindowPixelSizeChanged { width, height } = &event.kind {
+            if let WindowEventKind::WindowPixelSizeChanged { width, height, .. } = &event.kind {
                 let width =
                     u32::try_from(*width).map_err(|error| WindowError::Nul(error.to_string()))?;
                 let height =
@@ -2091,6 +2091,7 @@ mod conversions {
         /// # Safety
         /// The tag must identify an initialized SDL event payload.
         /// Referenced strings and counted arrays must be valid for reading during this call.
+        /// Scale-dependent window events require initialized SDL on its video thread.
         pub unsafe fn from_sdl(value: &sys::events::SDL_Event) -> Option<Self> {
             let event_type = sys::events::SDL_EventType(unsafe { value.r#type });
             let timestamp = unsafe { value.common.timestamp };
@@ -2492,9 +2493,11 @@ mod conversions {
                 sys::events::SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED => {
                     (unsafe { value.window.windowID }.into(), {
                         let window = unsafe { value.window };
+                        let (pixel_density, _) = window_scales(window.windowID)?;
                         WindowEventKind::WindowPixelSizeChanged {
                             width: window.data1,
                             height: window.data2,
+                            pixel_density,
                         }
                     })
                 }
@@ -2555,10 +2558,17 @@ mod conversions {
                         }
                     })
                 }
-                sys::events::SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED => (
-                    unsafe { value.window.windowID }.into(),
-                    WindowEventKind::WindowDisplayScaleChanged,
-                ),
+                sys::events::SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED => {
+                    let window_id = unsafe { value.window.windowID };
+                    let (pixel_density, display_scale) = window_scales(window_id)?;
+                    (
+                        window_id.into(),
+                        WindowEventKind::WindowDisplayScaleChanged {
+                            display_scale,
+                            pixel_density,
+                        },
+                    )
+                }
                 sys::events::SDL_EVENT_WINDOW_SAFE_AREA_CHANGED => (
                     unsafe { value.window.windowID }.into(),
                     WindowEventKind::WindowSafeAreaChanged,
@@ -2620,6 +2630,16 @@ mod conversions {
         }
     }
 
+    fn window_scales(id: sys::video::SDL_WindowID) -> Option<(f32, f32)> {
+        let window = unsafe { sys::video::SDL_GetWindowFromID(id) };
+        if window.is_null() {
+            return None;
+        }
+        let pixel_density = unsafe { sys::video::SDL_GetWindowPixelDensity(window) };
+        let display_scale = unsafe { sys::video::SDL_GetWindowDisplayScale(window) };
+        (pixel_density > 0.0 && display_scale > 0.0).then_some((pixel_density, display_scale))
+    }
+
     unsafe fn copy_strings(values: *const *const c_char, count: i32) -> Vec<String> {
         if count <= 0 {
             return Vec::new();
@@ -2633,6 +2653,69 @@ mod conversions {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn snapshots_window_scales_and_ignores_destroyed_windows() -> Result<(), WindowError> {
+            let instance = init()?;
+            let window = instance.create_native_window::<false>(WindowOptions {
+                title: "window scale event test",
+                x: 0,
+                y: 0,
+                width: 320,
+                height: 240,
+                flags: WindowFlags::HIDDEN,
+            })?;
+            let window_id = window.get_id()?;
+            let pixel_density = window.get_pixel_density()?;
+            let display_scale = window.get_display_scale()?;
+            for (event_type, expected) in [
+                (
+                    sys::events::SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,
+                    WindowEventKind::WindowPixelSizeChanged {
+                        width: 640,
+                        height: 480,
+                        pixel_density,
+                    },
+                ),
+                (
+                    sys::events::SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED,
+                    WindowEventKind::WindowDisplayScaleChanged {
+                        display_scale,
+                        pixel_density,
+                    },
+                ),
+            ] {
+                let raw = sys::events::SDL_Event {
+                    window: sys::events::SDL_WindowEvent {
+                        r#type: event_type,
+                        timestamp: 123,
+                        windowID: sys::video::SDL_WindowID(window_id.0),
+                        data1: 640,
+                        data2: 480,
+                        ..Default::default()
+                    },
+                };
+                let event = unsafe { WindowEvent::from_sdl(&raw) }.unwrap();
+                assert_eq!(event.timestamp, 123);
+                assert_eq!(event.window_id, window_id);
+                assert_eq!(event.kind, expected);
+            }
+            drop(window);
+            for event_type in [
+                sys::events::SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED,
+                sys::events::SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED,
+            ] {
+                let raw = sys::events::SDL_Event {
+                    window: sys::events::SDL_WindowEvent {
+                        r#type: event_type,
+                        windowID: sys::video::SDL_WindowID(window_id.0),
+                        ..Default::default()
+                    },
+                };
+                assert!(unsafe { WindowEvent::from_sdl(&raw) }.is_none());
+            }
+            Ok(())
+        }
 
         #[test]
         fn converts_window_header_and_position() {

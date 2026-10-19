@@ -367,6 +367,7 @@ pub enum WindowEventKind {
     WindowPixelSizeChanged {
         width: i32,
         height: i32,
+        pixel_density: f32,
     },
     WindowMetalViewResized,
     WindowMinimized,
@@ -385,7 +386,10 @@ pub enum WindowEventKind {
     WindowDisplayChanged {
         display_id: WindowDisplayId,
     },
-    WindowDisplayScaleChanged,
+    WindowDisplayScaleChanged {
+        display_scale: f32,
+        pixel_density: f32,
+    },
     WindowSafeAreaChanged,
     WindowOccluded,
     WindowEnterFullscreen,
