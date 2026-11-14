@@ -1,7 +1,7 @@
 //! Create a `View3dPlugin::default()` instance and call `plugin.load(ecs)` to register
 //! the View3d render system.
 
-use cxstd::Result;
+use anyhow::Result;
 use cxstd::ecs::{Ecs, Plugin};
 
 #[derive(Default)]

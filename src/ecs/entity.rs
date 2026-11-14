@@ -10,7 +10,8 @@ use std::{
 };
 
 use super::World;
-use crate::{Ref, Result};
+use crate::Ref;
+use anyhow::Result;
 
 static NEXT_ENTITY: AtomicU64 = AtomicU64::new(1);
 
@@ -33,16 +34,25 @@ impl EntityId {
 /// Marks additional data that can be selected by a component query.
 pub trait Component: Any {}
 
-/// Owns components until the entity is transferred into a World.
-/// World allocates an EntityId when it takes ownership of these components.
+/// Owns state and components before and after transfer into a World.
+/// World allocates an EntityId when it takes ownership of the entity.
 #[derive(Default)]
 pub struct Entity {
+    pub(super) state: Option<Box<dyn Any>>,
     pub(super) components: HashMap<TypeId, RefCell<Box<dyn Any>>>,
 }
 
 impl Entity {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Retain an ordinary struct as the entity's primary state.
+    pub fn with_state<T: 'static>(state: T) -> Self {
+        Self {
+            state: Some(Box::new(state)),
+            ..Self::new()
+        }
     }
 
     /// Add a component, returning the previous value of the same type, if any.

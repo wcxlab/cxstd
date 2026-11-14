@@ -286,16 +286,9 @@ impl TaskAbortHandle {
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("asynchronous operation is closed")]
 pub struct AsyncClosed;
-
-impl std::fmt::Display for AsyncClosed {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("asynchronous operation is closed")
-    }
-}
-
-impl std::error::Error for AsyncClosed {}
 
 /// Lifecycle state shared by a cancellation scope and its asynchronous contexts.
 #[derive(Clone)]

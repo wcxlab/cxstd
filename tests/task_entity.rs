@@ -2,10 +2,8 @@ mod support;
 
 use std::{cell::Cell, future::pending, rc::Rc};
 
-use cxstd::{
-    Result,
-    ecs::{Component, TaskEntity},
-};
+use anyhow::Result;
+use cxstd::ecs::{Component, TaskEntity};
 
 struct Label;
 impl Component for Label {}
@@ -79,5 +77,23 @@ fn despawning_before_first_flush_never_runs_the_future() -> Result<()> {
     ecs.world_mut().despawn(id);
     ecs.flush()?;
     assert_eq!(calls.get(), 0);
+    Ok(())
+}
+
+#[test]
+fn ecs_preserves_a_typed_task_error_when_propagating_it_through_anyhow() -> Result<()> {
+    use anyhow::Context as _;
+    use cxstd::ecs::AsyncClosed;
+
+    let (_runtime, mut ecs) = support::ecs::<()>()?;
+    ecs.task_executor().close();
+    ecs.world_mut().add_entity(TaskEntity::new(async {}));
+    let error = ecs.flush().context("failed to advance ECS").unwrap_err();
+    assert!(error.downcast_ref::<AsyncClosed>().is_some());
+    assert_eq!(error.to_string(), "failed to advance ECS");
+    assert_eq!(
+        error.downcast::<AsyncClosed>()?.to_string(),
+        "asynchronous operation is closed"
+    );
     Ok(())
 }

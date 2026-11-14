@@ -90,20 +90,22 @@ pub trait Window {
 
 /// Host callbacks for window initialization, events, updates, and rendering.
 /// Each window owns its handler and calls `init` once when built.
+/// Callbacks accept arbitrary errors through anyhow; unhandled failures are
+/// returned by window operations as `WindowError::Callback`.
 pub trait WindowHandler<W: Window + ?Sized> {
-    fn error(&mut self, error: WindowError) -> Result<(), WindowError> {
+    fn error(&mut self, error: anyhow::Error) -> anyhow::Result<()> {
         Err(error)
     }
 
-    fn init(&mut self, _window: &mut W) -> Result<(), WindowError> {
+    fn init(&mut self, _window: &mut W) -> anyhow::Result<()> {
         Ok(())
     }
 
-    fn update(&mut self, _window: &mut W) -> Result<(), WindowError> {
+    fn update(&mut self, _window: &mut W) -> anyhow::Result<()> {
         Ok(())
     }
 
-    fn render(&mut self, _window: &mut W) -> Result<(), WindowError> {
+    fn render(&mut self, _window: &mut W) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -111,11 +113,11 @@ pub trait WindowHandler<W: Window + ?Sized> {
         &mut self,
         _window: &mut W,
         _event: &PlatformEventMessage,
-    ) -> Result<(), WindowError> {
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 
-    fn frame_ready(&mut self, _window: &mut W) -> Result<(), WindowError> {
+    fn frame_ready(&mut self, _window: &mut W) -> anyhow::Result<()> {
         Ok(())
     }
 }

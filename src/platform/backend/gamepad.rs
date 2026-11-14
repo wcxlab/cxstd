@@ -2,8 +2,8 @@
 
 use std::{cell::Cell, ffi::CStr, ptr::NonNull, rc::Rc, time::Duration};
 
-use crate::Result;
 use crate::gamepad::{GamepadButton, GamepadInfo, GamepadState, GamepadType};
+use anyhow::Result;
 
 pub(crate) struct Gamepads {
     slots: Vec<Option<Device>>,

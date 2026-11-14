@@ -6,10 +6,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cxstd::{
-    Result,
-    ecs::{TaskExecutor, TaskScope},
-};
+use anyhow::Result;
+use cxstd::ecs::{TaskExecutor, TaskScope};
 
 fn executor() -> Result<(tokio::runtime::Runtime, TaskExecutor)> {
     let host = tokio::runtime::Runtime::new()?;

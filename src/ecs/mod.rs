@@ -36,7 +36,8 @@
 //! support tuples of up to eight items. Execution is serial and uses safe Rust.
 //!
 //! ```
-//! use cxstd::{Result, Resource};
+//! use anyhow::Result;
+//! use cxstd::Resource;
 //! use cxstd::ecs::{CommandQueue, Component, Ecs, Entity, Query, Res};
 //!
 //! struct Position(f32);

@@ -1,9 +1,7 @@
-//! Core types exposed through `cxstd::Result`, `cxstd::Ref` and shared input identifiers.
+//! Borrowed references and shared input identifiers exposed at the crate root.
 
 mod keycode;
 mod reference;
-mod result;
 
 pub use keycode::{GamepadAxis, KeyCode, KeyLocation};
 pub use reference::{Ref, RefMut};
-pub use result::Result;

@@ -8,10 +8,8 @@ use std::{
 };
 
 use super::{Task, TaskExecutor};
-use crate::{
-    Result,
-    ecs::{Component, Entity, World},
-};
+use crate::ecs::{Component, Entity, World};
+use anyhow::Result;
 
 /// An entity owning an asynchronous operation. Its output is discarded.
 /// Despawning the entity cancels its task. Completed entities remain until despawned.

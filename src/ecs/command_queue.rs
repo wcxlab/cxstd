@@ -3,7 +3,7 @@
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use super::{Component, EcsContext, Entity, EntityId, EntityRef, World};
-use crate::Result;
+use anyhow::Result;
 
 type Command<C> = Box<dyn FnOnce(&mut World, &mut C, EcsContext<'_, C>) -> Result<()>>;
 
@@ -96,7 +96,7 @@ impl<C: 'static> CommandQueue<C> {
 
     pub fn add_component<T: Component>(&self, entity: EntityId, component: T) {
         self.queue(move |world, _| {
-            world.add_component(entity, component)?;
+            world.entity_mut(entity)?.add_component(component);
             Ok(())
         });
     }

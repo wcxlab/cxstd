@@ -1,10 +1,11 @@
 mod support;
 
+use anyhow::Result;
 use cxstd::{
-    Resource, Resources, Result,
+    Resource, Resources,
     ecs::{
-        CommandQueue, Component, EcsContext, EntityId, EventDispatcher, IntoSystem, Query, Res,
-        ResMut, System, SystemAccess, SystemInput, SystemParam, TaskExecutor, World,
+        CommandQueue, Component, EcsContext, Entity, EntityId, EventDispatcher, IntoSystem, Query,
+        Res, ResMut, System, SystemAccess, SystemInput, SystemParam, TaskExecutor, World,
     },
 };
 use std::{
@@ -41,12 +42,14 @@ fn integrate(
 #[test]
 fn functions_infer_parameters_and_queries_select_matching_entities() -> Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
-    let moving = ecs.world_mut().spawn_empty();
-    ecs.world_mut().add_component(moving, Position(1.0))?;
-    ecs.world_mut().add_component(moving, Velocity(2.0))?;
-    let stationary = ecs.world_mut().spawn_empty();
-    ecs.world_mut().add_component(stationary, Position(100.0))?;
-    ecs.world_mut().spawn_empty();
+    let mut moving = Entity::new();
+    moving.add_component(Position(1.0));
+    moving.add_component(Velocity(2.0));
+    let moving = ecs.world_mut().add_entity(moving);
+    let mut stationary = Entity::new();
+    stationary.add_component(Position(100.0));
+    let stationary = ecs.world_mut().add_entity(stationary);
+    ecs.world_mut().add_entity(Entity::new());
     ecs.add_resource(Step(0.5))?;
     ecs.add_resource(Stats::default())?;
     ecs.add_system("update", integrate);
@@ -74,10 +77,11 @@ fn disjoint_mutable_queries_and_resources_work_in_any_parameter_order() -> Resul
     impl Component for Shared {}
     impl Resource for Shared {}
     let (_runtime, mut ecs) = support::ecs::<()>()?;
-    let entity = ecs.world_mut().spawn_empty();
-    ecs.world_mut().add_component(entity, Position(0.0))?;
-    ecs.world_mut().add_component(entity, Velocity(1.0))?;
-    ecs.world_mut().add_component(entity, Shared(1))?;
+    let mut entity = Entity::new();
+    entity.add_component(Position(0.0));
+    entity.add_component(Velocity(1.0));
+    entity.add_component(Shared(1));
+    let entity = ecs.world_mut().add_entity(entity);
     ecs.add_resource(Shared(10))?;
     ecs.add_resource(Stats::default())?;
     ecs.add_system(
@@ -106,8 +110,9 @@ fn disjoint_mutable_queries_and_resources_work_in_any_parameter_order() -> Resul
 #[test]
 fn duplicate_reads_are_allowed_for_queries_and_resources() -> Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
-    let entity = ecs.world_mut().spawn_empty();
-    ecs.world_mut().add_component(entity, Position(5.0))?;
+    let mut entity = Entity::new();
+    entity.add_component(Position(5.0));
+    let entity = ecs.world_mut().add_entity(entity);
     ecs.add_resource(Step(2.0))?;
     ecs.add_system(
         "update",
@@ -167,8 +172,9 @@ fn missing_resources_release_previously_fetched_guards() -> Result<()> {
 #[test]
 fn error_and_panic_release_borrows_and_stop_later_systems() -> Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
-    let entity = ecs.world_mut().spawn_empty();
-    ecs.world_mut().add_component(entity, Position(0.0))?;
+    let mut entity = Entity::new();
+    entity.add_component(Position(0.0));
+    let entity = ecs.world_mut().add_entity(entity);
     ecs.add_resource(Stats::default())?;
     ecs.add_system(
         "update",
@@ -184,8 +190,9 @@ fn error_and_panic_release_borrows_and_stop_later_systems() -> Result<()> {
     assert_eq!(ecs.world().component::<Position>(entity)?.0, 1.0);
 
     let (_runtime2, mut panic_ecs) = support::ecs::<()>()?;
-    let entity = panic_ecs.world_mut().spawn_empty();
-    panic_ecs.world_mut().add_component(entity, Position(0.0))?;
+    let mut entity = Entity::new();
+    entity.add_component(Position(0.0));
+    let entity = panic_ecs.world_mut().add_entity(entity);
     panic_ecs.add_resource(Stats::default())?;
     panic_ecs.add_system(
         "update",
@@ -210,7 +217,8 @@ fn error_and_panic_release_borrows_and_stop_later_systems() -> Result<()> {
 #[test]
 fn command_event_and_task_parameters_use_the_executing_ecs() -> Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
-    let target = ecs.world_mut().spawn(0_u32);
+    let target = ecs.world_mut().add_entity(Entity::with_state(0_u32));
+    let target = ecs.world_mut().typed::<u32>(target)?;
     ecs.add_resource(Stats::default())?;
     let subscription = ecs.subscribe(target.entity(), move |value: &u32, world, _| {
         *world.state_mut(target)? = *value;
@@ -288,7 +296,7 @@ fn closures_exclusive_functions_and_custom_systems_coexist() -> Result<()> {
             assert_eq!(world.entities().count(), local_calls - 1);
         })
         .add_system("update", |world: &mut World| {
-            world.spawn_empty();
+            world.add_entity(Entity::new());
         })
         .add_system("update", |host: &mut Host| {
             host.calls += 1;
@@ -346,9 +354,10 @@ fn host_resources_do_not_override_ecs_resources() -> Result<()> {
     let (_runtime, mut ecs) = support::ecs::<Simulation>()?;
     ecs.add_resource(Step(2.0))?;
     ecs.add_resource(Stats::default())?;
-    let entity = ecs.world_mut().spawn_empty();
-    ecs.world_mut().add_component(entity, Position(0.0))?;
-    ecs.world_mut().add_component(entity, Velocity(1.0))?;
+    let mut entity = Entity::new();
+    entity.add_component(Position(0.0));
+    entity.add_component(Velocity(1.0));
+    let entity = ecs.world_mut().add_entity(entity);
     ecs.add_system("update", integrate)
         .add_system("update", |host: &mut Simulation| {
             assert_eq!(host.name, "simulation");

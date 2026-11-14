@@ -8,7 +8,7 @@ use super::{
     CommandQueue, Component, EntityId, EntityRef, EventDispatcher, Res, ResMut, Resource,
     Resources, Subscription, Task, TaskExecutor, World,
 };
-use crate::Result;
+use anyhow::Result;
 
 /// Borrowed facilities for ECS execution and host adapters. Systems inject
 /// individual capabilities instead of this aggregate. Direct resource lookups
@@ -96,7 +96,7 @@ impl<'w, C: 'static> EcsContext<'w, C> {
 
     pub fn add_component<T: Component>(&self, entity: EntityId, component: T) {
         self.queue(move |world| {
-            world.add_component(entity, component)?;
+            world.entity_mut(entity)?.add_component(component);
             Ok(())
         });
     }

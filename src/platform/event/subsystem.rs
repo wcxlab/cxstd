@@ -2,9 +2,10 @@
 
 use std::rc::Rc;
 
+use crate::KeyCode;
 use crate::platform::PlatformEventMessage;
 use crate::platform::backend::sdl::{SdlContext, SdlInstance};
-use crate::{KeyCode, Result};
+use anyhow::Result;
 
 pub struct EventSubsystem {
     native: SdlInstance,

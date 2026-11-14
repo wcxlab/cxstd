@@ -5,7 +5,8 @@ use std::marker::PhantomData;
 use anyhow::ensure;
 
 use super::{Component, EntityId, SystemAccess, SystemInput, SystemParam, World};
-use crate::{Ref, RefMut, Result};
+use crate::{Ref, RefMut};
+use anyhow::Result;
 
 /// The component access and fetched item for one entity. Tuples combine fields
 /// with AND semantics; EntityId may be included without selecting a component.

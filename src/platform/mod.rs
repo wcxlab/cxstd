@@ -16,7 +16,7 @@ pub use events::*;
 pub use gamepad::GamepadSubsystem;
 pub use window::WindowSubsystem;
 
-use crate::Result;
+use anyhow::Result;
 
 pub struct Platform {
     window: WindowSubsystem,

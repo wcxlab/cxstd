@@ -2,8 +2,9 @@
 
 use std::rc::Rc;
 
+use crate::gamepad::Gamepad;
 use crate::platform::backend::sdl::{self, SdlContext};
-use crate::{Result, gamepad::Gamepad};
+use anyhow::Result;
 
 pub struct GamepadSubsystem {
     pub(in crate::platform) context: Rc<SdlContext>,

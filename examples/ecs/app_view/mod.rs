@@ -5,7 +5,7 @@ mod render;
 pub(super) mod view2d;
 pub(super) mod view3d;
 
-use cxstd::Result;
+use anyhow::Result;
 use cxstd::ecs::{Ecs, Plugin};
 
 use crate::app_core::AppCore;

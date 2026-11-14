@@ -3,7 +3,7 @@
 use std::marker::PhantomData;
 
 use super::{EcsContext, Res, Resource, System, SystemAccess, SystemInput, SystemParam, World};
-use crate::Result;
+use anyhow::Result;
 
 /// Function systems may return either unit or the framework's fallible result.
 pub trait SystemOutput {

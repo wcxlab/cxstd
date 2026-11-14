@@ -4,7 +4,8 @@
 //! access. Both retain their storage borrow for the lifetime of the guard.
 //!
 //! ```
-//! use cxstd::{Res, ResMut, Result, Resource, Resources};
+//! use anyhow::Result;
+//! use cxstd::{Res, ResMut, Resource, Resources};
 //! struct Counter(u32);
 //! impl Resource for Counter {}
 //! # fn main() -> Result<()> {
@@ -39,7 +40,8 @@ use std::{
 
 use anyhow::{anyhow, ensure};
 
-use crate::{Ref, RefMut, Result};
+use crate::{Ref, RefMut};
+use anyhow::Result;
 
 /// Marks a type that can be registered as a resource.
 ///

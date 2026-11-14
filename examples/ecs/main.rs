@@ -7,7 +7,7 @@
 mod app_core;
 mod app_view;
 
-use cxstd::Result;
+use anyhow::Result;
 use std::time::Duration;
 
 use app_core::AppCore;

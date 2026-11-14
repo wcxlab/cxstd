@@ -12,7 +12,8 @@ pub use subsystem::GamepadSubsystem;
 
 use std::{cell::Cell, fmt, rc::Rc, time::Duration};
 
-use crate::{GamepadAxis, KeyCode, Result};
+use crate::{GamepadAxis, KeyCode};
+use anyhow::Result;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GamepadType {

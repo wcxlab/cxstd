@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::Result;
 use cxstd::platform::{self, PlatformEvent, PlatformEventFlags, PlatformEventMessage};
 use cxstd::window::{WgpuWindow, Window, WindowCursor, WindowError, WindowHandler, WindowId};
 
@@ -28,12 +29,12 @@ struct Handler {
 }
 
 impl WindowHandler<WgpuWindow> for Handler {
-    fn init(&mut self, _window: &mut WgpuWindow) -> Result<(), WindowError> {
+    fn init(&mut self, _window: &mut WgpuWindow) -> anyhow::Result<()> {
         self.calls.borrow_mut().push("init");
         Ok(())
     }
 
-    fn update(&mut self, _window: &mut WgpuWindow) -> Result<(), WindowError> {
+    fn update(&mut self, _window: &mut WgpuWindow) -> anyhow::Result<()> {
         self.calls.borrow_mut().push("update");
         Ok(())
     }
@@ -42,17 +43,17 @@ impl WindowHandler<WgpuWindow> for Handler {
         &mut self,
         _window: &mut WgpuWindow,
         _event: &PlatformEventMessage,
-    ) -> Result<(), WindowError> {
+    ) -> anyhow::Result<()> {
         self.calls.borrow_mut().push("event");
         Ok(())
     }
 
-    fn render(&mut self, _window: &mut WgpuWindow) -> Result<(), WindowError> {
+    fn render(&mut self, _window: &mut WgpuWindow) -> anyhow::Result<()> {
         self.calls.borrow_mut().push("render");
         Ok(())
     }
 
-    fn frame_ready(&mut self, _window: &mut WgpuWindow) -> Result<(), WindowError> {
+    fn frame_ready(&mut self, _window: &mut WgpuWindow) -> anyhow::Result<()> {
         self.calls.borrow_mut().push("frame_ready");
         Ok(())
     }
@@ -80,12 +81,12 @@ fn window_retains_handler_after_panics_and_drops_it_before_native_resources()
         owner: Option<std::rc::Weak<dyn raw_window_handle::HasWindowHandle>>,
     }
     impl WindowHandler<WgpuWindow> for OwnedHandler {
-        fn init(&mut self, window: &mut WgpuWindow) -> Result<(), WindowError> {
+        fn init(&mut self, window: &mut WgpuWindow) -> anyhow::Result<()> {
             self.owner = Some(Rc::downgrade(&window.window_handle_provider()));
             assert!(window.update().is_err());
             Ok(())
         }
-        fn update(&mut self, window: &mut WgpuWindow) -> Result<(), WindowError> {
+        fn update(&mut self, window: &mut WgpuWindow) -> anyhow::Result<()> {
             self.calls.set(self.calls.get() + 1);
             assert!(window.update().is_err());
             if std::mem::replace(&mut self.panic_next, false) {
@@ -437,12 +438,12 @@ fn releases_handler_when_initialization_fails() -> Result<(), WindowError> {
     }
 
     impl WindowHandler<WgpuWindow> for FailingHandler {
-        fn init(&mut self, window: &mut WgpuWindow) -> Result<(), WindowError> {
+        fn init(&mut self, window: &mut WgpuWindow) -> anyhow::Result<()> {
             assert_ne!(window.id(), WindowId(0));
-            Err(WindowError::Nul("initialization failed".into()))
+            anyhow::bail!("initialization failed")
         }
 
-        fn error(&mut self, error: WindowError) -> Result<(), WindowError> {
+        fn error(&mut self, error: anyhow::Error) -> anyhow::Result<()> {
             self.errors.set(self.errors.get() + 1);
             Err(error)
         }
@@ -466,7 +467,9 @@ fn releases_handler_when_initialization_fails() -> Result<(), WindowError> {
             dropped: Rc::clone(&dropped),
         })
         .build();
-    assert!(matches!(result, Err(WindowError::Nul(message)) if message == "initialization failed"));
+    assert!(
+        matches!(result, Err(WindowError::Callback(error)) if error.to_string() == "initialization failed")
+    );
     assert_eq!(errors.get(), 1);
     assert!(dropped.get());
     Ok(())
@@ -551,18 +554,18 @@ fn callback_requests_are_queued_for_later_polls_and_skipped_frames_can_retry()
         fail_render: Rc<Cell<bool>>,
     }
     impl WindowHandler<WgpuWindow> for RequestHandler {
-        fn update(&mut self, window: &mut WgpuWindow) -> Result<(), WindowError> {
+        fn update(&mut self, window: &mut WgpuWindow) -> anyhow::Result<()> {
             window.request_close()?;
-            window.request_redraw()
+            Ok(window.request_redraw()?)
         }
-        fn render(&mut self, window: &mut WgpuWindow) -> Result<(), WindowError> {
+        fn render(&mut self, window: &mut WgpuWindow) -> anyhow::Result<()> {
             if self.fail_render.get() {
-                Err(WindowError::Unknown)
+                Err(WindowError::Unknown.into())
             } else {
-                window.request_redraw()
+                Ok(window.request_redraw()?)
             }
         }
-        fn error(&mut self, _: WindowError) -> Result<(), WindowError> {
+        fn error(&mut self, _: anyhow::Error) -> anyhow::Result<()> {
             Ok(())
         }
     }

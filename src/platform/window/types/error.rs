@@ -6,4 +6,6 @@ pub enum WindowError {
     Nul(String),
     #[error("unknown window error")]
     Unknown,
+    #[error("window callback failed: {0}")]
+    Callback(#[source] anyhow::Error),
 }

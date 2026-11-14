@@ -14,7 +14,7 @@ use super::{
     CommandQueue, EcsContext, EntityId, EventDispatcher, IntoSystem, Res, ResMut, Resource,
     Resources, Schedule, Subscription, Task, TaskExecutor, World,
 };
-use crate::Result;
+use anyhow::Result;
 
 /// An independent ECS instance. Schedules and systems retain registration order
 /// and state across runs. Schedules are identified by their string names.

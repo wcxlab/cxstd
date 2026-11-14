@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cxstd::Result;
+use anyhow::Result;
 use cxstd::ecs::{Ecs, Plugin, ResMut, Resource};
 
 #[derive(Default)]

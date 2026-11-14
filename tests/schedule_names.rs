@@ -1,9 +1,7 @@
 mod support;
 
-use cxstd::{
-    Result,
-    ecs::{ResMut, Resource},
-};
+use anyhow::Result;
+use cxstd::ecs::{ResMut, Resource};
 
 #[derive(Default)]
 struct Trace(Vec<u8>);

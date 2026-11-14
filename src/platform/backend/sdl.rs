@@ -117,7 +117,7 @@ pub(crate) fn poll_event() -> Option<PlatformEventMessage> {
     SdlInstance { context }.poll_event()
 }
 
-pub(crate) fn get_gamepads() -> crate::Result<Vec<Option<crate::gamepad::Gamepad>>> {
+pub(crate) fn get_gamepads() -> anyhow::Result<Vec<Option<crate::gamepad::Gamepad>>> {
     let context = init()?.context;
     let gamepads = gamepads_for_context(&context)?;
     // Keep the standalone enumeration entry point monitoring hotplug events.
@@ -129,7 +129,7 @@ pub(crate) fn get_gamepads() -> crate::Result<Vec<Option<crate::gamepad::Gamepad
 
 pub(crate) fn gamepads_for_context(
     context: &Rc<SdlContext>,
-) -> crate::Result<Vec<Option<crate::gamepad::Gamepad>>> {
+) -> anyhow::Result<Vec<Option<crate::gamepad::Gamepad>>> {
     let states = {
         let mut gamepads = context.gamepads.borrow_mut();
         if gamepads.is_none() {

@@ -1,7 +1,7 @@
 use anyhow::Context as _;
 
 use super::{EcsContext, IntoSystem, World};
-use crate::Result;
+use anyhow::Result;
 
 /// A persistent unit of serial execution. Function systems inject declared parameters.
 /// Systems may retain non-Send state, such as an event cursor or a UI runtime.

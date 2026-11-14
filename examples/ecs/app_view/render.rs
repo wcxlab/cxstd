@@ -2,7 +2,7 @@
 //! Load it after view plugins so `render_system` runs after their paint systems.
 //! The first update adds a task entity owning the counter's asynchronous loop.
 
-use cxstd::Result;
+use anyhow::Result;
 use cxstd::ecs::{Component, Ecs, Plugin, Res, Resource, TaskEntity, World};
 
 use crate::app_core::Status;

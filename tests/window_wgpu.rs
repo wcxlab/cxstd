@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::Result;
 use cxstd::platform::{self, PlatformEvent, PlatformEventMessage};
 use cxstd::window::{WgpuWindow, Window, WindowError, WindowHandler};
 
@@ -27,17 +28,17 @@ struct FirstWindow {
 }
 
 impl WindowHandler<WgpuWindow> for FirstWindow {
-    fn error(&mut self, _: WindowError) -> Result<(), WindowError> {
+    fn error(&mut self, _: anyhow::Error) -> anyhow::Result<()> {
         self.state.errors.set(self.state.errors.get() + 1);
         Ok(())
     }
-    fn init(&mut self, window: &mut WgpuWindow) -> Result<(), WindowError> {
+    fn init(&mut self, window: &mut WgpuWindow) -> anyhow::Result<()> {
         assert!(!self.state.initialized.replace(true));
         window.set_clear_color(wgpu::Color::GREEN);
         Ok(())
     }
 
-    fn update(&mut self, _window: &mut WgpuWindow) -> Result<(), WindowError> {
+    fn update(&mut self, _window: &mut WgpuWindow) -> anyhow::Result<()> {
         self.state.updates.set(self.state.updates.get() + 1);
         Ok(())
     }
@@ -46,7 +47,7 @@ impl WindowHandler<WgpuWindow> for FirstWindow {
         &mut self,
         window: &mut WgpuWindow,
         event: &PlatformEventMessage,
-    ) -> Result<(), WindowError> {
+    ) -> anyhow::Result<()> {
         if matches!(
             event.event,
             PlatformEvent::Redraw | PlatformEvent::Resize(_)
@@ -57,18 +58,18 @@ impl WindowHandler<WgpuWindow> for FirstWindow {
         Ok(())
     }
 
-    fn render(&mut self, window: &mut WgpuWindow) -> Result<(), WindowError> {
+    fn render(&mut self, window: &mut WgpuWindow) -> anyhow::Result<()> {
         let frame = window.next_frame()?;
         let _view = frame.texture_view();
         assert!(window.next_frame().is_err());
         assert!(!self.state.panic_render.get(), "expected render panic");
         if self.state.fail_render.get() {
-            return Err(WindowError::Unknown);
+            return Err(WindowError::Unknown.into());
         }
         Ok(())
     }
 
-    fn frame_ready(&mut self, _window: &mut WgpuWindow) -> Result<(), WindowError> {
+    fn frame_ready(&mut self, _window: &mut WgpuWindow) -> anyhow::Result<()> {
         self.state.frames.set(self.state.frames.get() + 1);
         Ok(())
     }
@@ -80,13 +81,13 @@ struct SecondWindow {
 }
 
 impl WindowHandler<WgpuWindow> for SecondWindow {
-    fn init(&mut self, window: &mut WgpuWindow) -> Result<(), WindowError> {
+    fn init(&mut self, window: &mut WgpuWindow) -> anyhow::Result<()> {
         assert!(!self.state.initialized.replace(true));
         window.set_clear_color(wgpu::Color::BLUE);
         Ok(())
     }
 
-    fn update(&mut self, _window: &mut WgpuWindow) -> Result<(), WindowError> {
+    fn update(&mut self, _window: &mut WgpuWindow) -> anyhow::Result<()> {
         self.state.updates.set(self.state.updates.get() + 1);
         Ok(())
     }
@@ -95,7 +96,7 @@ impl WindowHandler<WgpuWindow> for SecondWindow {
         &mut self,
         window: &mut WgpuWindow,
         event: &PlatformEventMessage,
-    ) -> Result<(), WindowError> {
+    ) -> anyhow::Result<()> {
         if matches!(
             event.event,
             PlatformEvent::Redraw | PlatformEvent::Resize(_)
@@ -106,13 +107,13 @@ impl WindowHandler<WgpuWindow> for SecondWindow {
         Ok(())
     }
 
-    fn render(&mut self, window: &mut WgpuWindow) -> Result<(), WindowError> {
+    fn render(&mut self, window: &mut WgpuWindow) -> anyhow::Result<()> {
         let frame = window.next_frame()?;
         let _view = frame.texture_view();
         Ok(())
     }
 
-    fn frame_ready(&mut self, _window: &mut WgpuWindow) -> Result<(), WindowError> {
+    fn frame_ready(&mut self, _window: &mut WgpuWindow) -> anyhow::Result<()> {
         self.state.frames.set(self.state.frames.get() + 1);
         Ok(())
     }

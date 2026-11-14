@@ -2,7 +2,7 @@
 //! page entities and tree and paint systems.
 //! The host supplies a Core Status snapshot before running the update schedule.
 
-use cxstd::Result;
+use anyhow::Result;
 use cxstd::ecs::{Component, Ecs, Entity, Plugin, Query, Res, ResMut};
 
 use super::render::PaintList;
@@ -101,7 +101,7 @@ mod tests {
     use super::*;
     use crate::app_core::AppCore;
     use crate::app_view::AppView;
-    use cxstd::Result;
+    use anyhow::Result;
 
     #[tokio::test]
     async fn render_reads_the_latest_tree_without_accumulating_paint_commands() -> Result<()> {

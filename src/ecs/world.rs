@@ -1,47 +1,35 @@
 use std::{
     any::{Any, TypeId, type_name},
-    cell::RefCell,
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
 };
 
 use anyhow::{anyhow, bail, ensure};
 
 use super::{Component, Entity, EntityId, EntityRef};
-use crate::{Ref, RefMut, Result};
+use crate::{Ref, RefMut};
+use anyhow::Result;
 
 type Value = Box<dyn Any>;
-
-#[derive(Default)]
-struct EntityData {
-    state: Option<Value>,
-    components: HashMap<TypeId, RefCell<Value>>,
-}
 
 /// Entity state and queryable components, independent of application resources.
 /// Entity iteration is deterministic and follows allocation order. World owns
 /// state lifetimes; typed handles do not keep despawned state alive.
 #[derive(Default)]
 pub struct World {
-    entities: BTreeMap<EntityId, EntityData>,
+    entities: BTreeMap<EntityId, Entity>,
 }
 
 impl World {
-    /// Consume assembled components and create a fully populated entity.
+    /// Take ownership of an entity with its assembled state and components.
     pub fn add_entity(&mut self, entity: impl Into<Entity>) -> EntityId {
         let id = EntityId::allocate();
         self.materialize_entity(id, entity.into());
         id
     }
 
-    pub fn spawn_empty(&mut self) -> EntityId {
-        self.add_entity(Entity::new())
-    }
-
-    /// Retain an ordinary struct as one entity's primary state.
-    pub fn spawn<T: 'static>(&mut self, state: T) -> EntityRef<T> {
-        let entity = self.spawn_empty();
-        self.entities.get_mut(&entity).unwrap().state = Some(Box::new(state));
-        EntityRef::new(entity)
+    /// Access an existing entity to add or replace its components.
+    pub fn entity_mut(&mut self, entity: EntityId) -> Result<&mut Entity> {
+        self.data_mut(entity)
     }
 
     pub fn contains(&self, entity: EntityId) -> bool {
@@ -103,23 +91,6 @@ impl World {
         };
         let state = scope.value.as_mut().unwrap().downcast_mut::<T>().unwrap();
         update(state, scope.world)
-    }
-
-    pub fn add_component<C: Component>(
-        &mut self,
-        entity: EntityId,
-        component: C,
-    ) -> Result<Option<C>> {
-        let previous = self
-            .data_mut(entity)?
-            .components
-            .insert(TypeId::of::<C>(), RefCell::new(Box::new(component)));
-        Ok(previous.map(|value| {
-            *value
-                .into_inner()
-                .downcast::<C>()
-                .expect("component type matches its key")
-        }))
     }
 
     pub fn remove<C: Component>(&mut self, entity: EntityId) -> Result<Option<C>> {
@@ -207,22 +178,16 @@ impl World {
 
 impl World {
     pub(super) fn materialize_entity(&mut self, id: EntityId, entity: Entity) {
-        self.entities.insert(
-            id,
-            EntityData {
-                state: None,
-                components: entity.components,
-            },
-        );
+        self.entities.insert(id, entity);
     }
 
     /// Materialize an identity reserved by the process-wide entity allocator.
     pub(super) fn materialize(&mut self, entity: EntityId, state: Option<Value>) {
         self.entities.insert(
             entity,
-            EntityData {
+            Entity {
                 state,
-                components: HashMap::new(),
+                ..Entity::new()
             },
         );
     }
@@ -252,13 +217,13 @@ impl World {
         .into())
     }
 
-    fn data(&self, entity: EntityId) -> Result<&EntityData> {
+    fn data(&self, entity: EntityId) -> Result<&Entity> {
         self.entities
             .get(&entity)
             .ok_or_else(|| anyhow!("entity {entity:?} does not exist in this World"))
     }
 
-    fn data_mut(&mut self, entity: EntityId) -> Result<&mut EntityData> {
+    fn data_mut(&mut self, entity: EntityId) -> Result<&mut Entity> {
         match self.entities.get_mut(&entity) {
             Some(data) => Ok(data),
             None => bail!("entity {entity:?} does not exist in this World"),

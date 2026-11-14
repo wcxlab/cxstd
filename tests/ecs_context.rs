@@ -1,7 +1,8 @@
 mod support;
 
+use anyhow::Result;
 use cxstd::{
-    Resource, Result,
+    Resource,
     ecs::{
         CommandQueue, Component, Entity, EntityId, EventDispatcher, Query, Res, ResMut,
         Subscription, World,
@@ -47,8 +48,9 @@ fn host_resource_handles_share_injection_and_preserve_independent_borrows() -> R
 fn entity_commands_reserve_ids_and_apply_in_order_at_barriers() -> Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     ecs.add_resource(Ids::default())?;
-    let original = ecs.world_mut().spawn_empty();
-    ecs.world_mut().add_component(original, Position(5))?;
+    let mut original = Entity::new();
+    original.add_component(Position(5));
+    let original = ecs.world_mut().add_entity(original);
     ecs.add_system(
         "build",
         move |cx: CommandQueue, mut ids: ResMut<Ids>, positions: Query<&Position>| {
@@ -98,7 +100,8 @@ impl Resource for Subscriptions {}
 #[test]
 fn context_delivers_tasks_typed_events_and_change_notifications() -> Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
-    let target = ecs.world_mut().spawn(0_u32);
+    let target = ecs.world_mut().add_entity(Entity::with_state(0_u32));
+    let target = ecs.world_mut().typed::<u32>(target)?;
     ecs.add_resource(Target(target.entity()))?;
     ecs.add_resource(Subscriptions::default())?;
     let changes = Rc::new(Cell::new(0));

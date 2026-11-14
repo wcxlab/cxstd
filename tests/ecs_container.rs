@@ -1,7 +1,8 @@
 mod support;
 
-use cxstd::ecs::{CommandQueue, ResMut, World};
-use cxstd::{Resource, Result};
+use anyhow::Result;
+use cxstd::Resource;
+use cxstd::ecs::{CommandQueue, Entity, ResMut, World};
 
 #[derive(Default)]
 struct Trace(Vec<usize>);
@@ -52,10 +53,11 @@ fn stage_errors_preserve_changes_and_stop_later_stages() -> Result<()> {
 fn command_barriers_apply_to_the_owning_ecs_world() -> Result<()> {
     let (_runtime1, mut first) = support::ecs::<()>()?;
     let (_runtime2, mut second) = support::ecs::<()>()?;
-    let other = second.world_mut().spawn(7_u32);
+    let other = second.world_mut().add_entity(Entity::with_state(7_u32));
+    let other = second.world_mut().typed::<u32>(other)?;
     first.add_system("first", |commands: CommandQueue| {
         commands.queue(|world, _| {
-            world.spawn(9_u32);
+            world.add_entity(Entity::with_state(9_u32));
             Ok(())
         });
     });

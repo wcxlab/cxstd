@@ -4,7 +4,7 @@
 
 mod status;
 
-use cxstd::Result;
+use anyhow::Result;
 use cxstd::ecs::{Ecs, Plugin};
 
 pub(super) use status::Status;
@@ -49,7 +49,7 @@ impl Drop for AppCore {
 mod tests {
     use super::*;
     use crate::app_view::AppView;
-    use cxstd::ecs::{ResMut, Resource, World};
+    use cxstd::ecs::{Entity, ResMut, Resource, World};
 
     #[derive(Default)]
     struct Frames(usize);
@@ -62,7 +62,8 @@ mod tests {
         core.ecs.add_system("update", |mut frames: ResMut<Frames>| {
             frames.0 += 1;
         });
-        let business = core.ecs.world_mut().spawn(10_u32);
+        let business = core.ecs.world_mut().add_entity(Entity::with_state(10_u32));
+        let business = core.ecs.world_mut().typed::<u32>(business)?;
         core.ecs
             .add_system("update", move |world: &mut World| -> Result<()> {
                 *world.state_mut(business)? += 1;

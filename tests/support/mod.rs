@@ -1,4 +1,5 @@
-use cxstd::{Result, ecs::Ecs};
+use anyhow::Result;
+use cxstd::ecs::Ecs;
 
 pub fn ecs<C: 'static>() -> Result<(tokio::runtime::Runtime, Ecs<C>)> {
     let runtime = tokio::runtime::Runtime::new()?;

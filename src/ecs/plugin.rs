@@ -2,7 +2,7 @@
 //! released through `plugin.unload(&mut ecs)` before the ECS is dropped.
 
 use super::Ecs;
-use crate::Result;
+use anyhow::Result;
 
 /// Groups ECS setup and optional cleanup behind an application-owned instance.
 pub trait Plugin<C: 'static = ()> {

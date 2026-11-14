@@ -1,6 +1,6 @@
 mod cxstd;
 
-pub use cxstd::{GamepadAxis, KeyCode, KeyLocation, Ref, RefMut, Result};
+pub use cxstd::{GamepadAxis, KeyCode, KeyLocation, Ref, RefMut};
 pub use ecs::{Res, ResMut, Resource, ResourceScope, Resources};
 pub use platform::{PlatformEvent, PlatformEventFlags, PlatformEventMessage, gamepad, window};
 

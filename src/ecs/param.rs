@@ -13,7 +13,7 @@ use super::{
     CommandQueue, Component, EcsContext, EntityId, EventDispatcher, Res, ResMut, Resource,
     Resources, TaskExecutor, World,
 };
-use crate::Result;
+use anyhow::Result;
 
 /// Independently borrowed owners supplied when fetching function parameters.
 pub struct SystemInput<'w, C> {

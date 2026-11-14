@@ -1,6 +1,10 @@
 mod support;
 
-use cxstd::{Resource, Result, ecs::CommandQueue};
+use anyhow::Result;
+use cxstd::{
+    Resource,
+    ecs::{CommandQueue, Entity},
+};
 use std::{
     cell::Cell,
     future::pending,
@@ -25,7 +29,8 @@ impl Resource for Trace {}
 #[test]
 fn commands_wait_for_barriers_and_keep_new_work_for_the_next_batch() -> Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
-    let value = ecs.world_mut().spawn(0_u32);
+    let value = ecs.world_mut().add_entity(Entity::with_state(0_u32));
+    let value = ecs.world_mut().typed::<u32>(value)?;
     ecs.add_resource(Trace::default())?;
     let observed = Rc::new(Cell::new(0));
     let calls = observed.clone();
@@ -95,8 +100,9 @@ fn scoped_resources_restore_after_errors_and_panics_with_world_access() -> Resul
         catch_unwind(AssertUnwindSafe(|| {
             let _ = ecs.with_resource::<Local, ()>(|resource, ecs| {
                 resource.0.set(1);
-                ecs.world_mut()
-                    .spawn(String::from("scoped resource can access entities"));
+                ecs.world_mut().add_entity(Entity::with_state(String::from(
+                    "scoped resource can access entities",
+                )));
                 assert!(ecs.resource::<Local>().is_err());
                 assert!(ecs.add_resource(Local(count.clone())).is_err());
                 panic!("expected unwind");
@@ -125,7 +131,10 @@ fn dropping_an_ecs_releases_its_resources_and_state() -> Result<()> {
     let state_lifetime = Rc::new(());
     let resource_lifetime = Rc::new(());
     ecs.add_resource(Local(resource_lifetime.clone()))?;
-    let entity = ecs.world_mut().spawn(state_lifetime.clone());
+    let entity = ecs
+        .world_mut()
+        .add_entity(Entity::with_state(state_lifetime.clone()));
+    let entity = ecs.world_mut().typed::<Rc<()>>(entity)?;
     assert_eq!(Rc::strong_count(&state_lifetime), 2);
     assert_eq!(Rc::strong_count(&ecs.resource::<Local>()?.0), 2);
     drop(ecs);
@@ -140,8 +149,10 @@ fn dropping_an_ecs_releases_its_resources_and_state() -> Result<()> {
 fn targeted_events_are_typed_batched_cancelled_and_pruned_after_despawn() -> Result<()> {
     struct Edited(u32);
     let (_runtime, mut ecs) = support::ecs::<()>()?;
-    let panel = ecs.world_mut().spawn(0_u32);
-    let other = ecs.world_mut().spawn(0_u32);
+    let panel = ecs.world_mut().add_entity(Entity::with_state(0_u32));
+    let panel = ecs.world_mut().typed::<u32>(panel)?;
+    let other = ecs.world_mut().add_entity(Entity::with_state(0_u32));
+    let other = ecs.world_mut().typed::<u32>(other)?;
     let count = Rc::new(Cell::new(0));
     let observed = count.clone();
     let changed = ecs.observe(panel.entity(), move |_, _| {
@@ -180,7 +191,7 @@ fn targeted_events_are_typed_batched_cancelled_and_pruned_after_despawn() -> Res
 #[test]
 fn deleting_a_target_skips_later_callbacks_and_releases_captures() -> Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
-    let target = ecs.world_mut().spawn_empty();
+    let target = ecs.world_mut().add_entity(Entity::new());
     let lifetime = Rc::new(());
     let captured = lifetime.clone();
     let first = ecs.subscribe(target, move |_: &(), world, _| {
@@ -204,7 +215,8 @@ fn deleting_a_target_skips_later_callbacks_and_releases_captures() -> Result<()>
 fn async_completion_uses_owner_facilities_and_observers_wait_for_the_next_batch() -> Result<()> {
     struct Edited(u32);
     let (_runtime, mut ecs) = support::ecs::<()>()?;
-    let value = ecs.world_mut().spawn(0_u32);
+    let value = ecs.world_mut().add_entity(Entity::with_state(0_u32));
+    let value = ecs.world_mut().typed::<u32>(value)?;
     let count = Rc::new(Cell::new(0));
     let observed = count.clone();
     let events = ecs.event_dispatcher().clone();
@@ -242,7 +254,7 @@ fn async_completion_uses_owner_facilities_and_observers_wait_for_the_next_batch(
 #[test]
 fn observer_and_completion_errors_return_at_command_barriers() -> Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
-    let target = ecs.world_mut().spawn_empty();
+    let target = ecs.world_mut().add_entity(Entity::new());
     let changed = ecs.observe(target, |_, _| anyhow::bail!("observer failure"));
     ecs.notify(target);
     assert!(format!("{:#}", ecs.flush().unwrap_err()).contains("observer failure"));
@@ -264,7 +276,7 @@ fn observer_and_completion_errors_return_at_command_barriers() -> Result<()> {
 #[test]
 fn dropping_an_ecs_cancels_tasks_and_breaks_owned_observer_cycles() -> Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
-    let target = ecs.world_mut().spawn_empty();
+    let target = ecs.world_mut().add_entity(Entity::new());
     let lifetime = Rc::new(());
     let capture = lifetime.clone();
     let events = ecs.event_dispatcher().clone();
@@ -298,8 +310,8 @@ fn ecs_instances_isolate_resources_tasks_events_and_observers() -> Result<()> {
     let (_runtime2, mut second) = support::ecs::<()>()?;
     first.add_resource(Trace(vec!["first"]))?;
     second.add_resource(Trace(vec!["second"]))?;
-    let first_target = first.world_mut().spawn_empty();
-    let second_target = second.world_mut().spawn_empty();
+    let first_target = first.world_mut().add_entity(Entity::new());
+    let second_target = second.world_mut().add_entity(Entity::new());
     let count = Rc::new(Cell::new(0));
     let observed = count.clone();
     let changed = second.observe(second_target, move |_, _| {

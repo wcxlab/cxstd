@@ -96,7 +96,7 @@ impl WgpuWindow {
                 Ok(true) => {}
                 Ok(false) => return Ok(false),
                 Err(error) => {
-                    handler.error(error)?;
+                    handler.error(error.into())?;
                     return Ok(false);
                 }
             }
@@ -255,6 +255,7 @@ impl WgpuWindow {
             let result = window
                 .inner
                 .refresh_metrics()
+                .map_err(anyhow::Error::from)
                 .and_then(|()| handler.update(window));
             result.or_else(|error| handler.error(error))
         })
@@ -451,7 +452,7 @@ impl WgpuWindow {
 
     fn with_handler<T>(
         &mut self,
-        callback: impl FnOnce(&mut dyn WindowHandler<Self>, &mut Self) -> Result<T, WindowError>,
+        callback: impl FnOnce(&mut dyn WindowHandler<Self>, &mut Self) -> anyhow::Result<T>,
     ) -> Result<T, WindowError> {
         let mut handler = self
             .handler
@@ -466,7 +467,7 @@ impl WgpuWindow {
             ));
         }
         match result {
-            Ok(result) => result,
+            Ok(result) => result.map_err(WindowError::Callback),
             Err(payload) => resume_unwind(payload),
         }
     }

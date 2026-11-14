@@ -4,10 +4,11 @@
 
 use std::time::Duration;
 
+use anyhow::Result;
+use cxstd::KeyCode;
 use cxstd::platform::Platform;
 use cxstd::platform::{PlatformEvent, PlatformEventMessage};
-use cxstd::window::{WgpuWindow, Window, WindowError, WindowHandler};
-use cxstd::{KeyCode, Result};
+use cxstd::window::{WgpuWindow, Window, WindowHandler};
 
 #[derive(Default)]
 struct MainWindow {
@@ -19,7 +20,7 @@ impl WindowHandler<WgpuWindow> for MainWindow {
         &mut self,
         window: &mut WgpuWindow,
         event: &PlatformEventMessage,
-    ) -> std::result::Result<(), WindowError> {
+    ) -> anyhow::Result<()> {
         println!("{event:?}");
         match &event.event {
             PlatformEvent::MouseDown(mouse) if mouse.button == KeyCode::MouseLeft => {
