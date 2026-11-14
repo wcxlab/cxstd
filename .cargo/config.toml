@@ -1,0 +1,2 @@
+[env]
+CMAKE_TOOLCHAIN_FILE = { value = "cmake/msvc-runtime.cmake", relative = true }

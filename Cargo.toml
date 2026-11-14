@@ -1,0 +1,22 @@
+[package]
+name = "cxstd"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.100"
+description = "Shared ECS, task, and window interfaces."
+license = "Apache-2.0"
+repository = "https://github.com/wcxlab/cxstd"
+
+[dependencies]
+anyhow = "1"
+futures = "0.3.32"
+elsa = "1.11.2"
+raw-window-handle = "0.6"
+pollster = "1"
+sdl3-sys = { version = "0.7.2", default-features = false, features = ["build-from-source-static"] }
+thiserror = "2"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "dx12", "metal", "vulkan"] }
+
+[workspace]
+resolver = "3"
