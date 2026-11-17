@@ -42,16 +42,16 @@ impl WgpuWindow {
     pub fn set_clear_color(&mut self, color: wgpu::Color) {
         self.inner.set_clear_color(color);
     }
-    pub fn resize_surface(&mut self, width: u32, height: u32) -> Result<(), WindowError> {
+    pub fn resize_surface(&mut self, width: u32, height: u32) -> anyhow::Result<()> {
         self.inner.resize_surface(width, height)
     }
-    pub fn next_frame(&self) -> Result<WgpuWindowFrame<'_>, WindowError> {
+    pub fn next_frame(&self) -> anyhow::Result<WgpuWindowFrame<'_>> {
         Ok(WgpuWindowFrame {
             inner: self.inner.next_frame()?,
         })
     }
 
-    pub fn window_event(&mut self, event: &PlatformEventMessage) -> Result<(), WindowError> {
+    pub fn window_event(&mut self, event: &PlatformEventMessage) -> anyhow::Result<()> {
         self.with_handler(|handler, window| {
             let result = (|| {
                 if event.window_id != window.id() {
@@ -90,13 +90,13 @@ impl WgpuWindow {
         })
     }
 
-    pub fn render(&mut self) -> Result<bool, WindowError> {
+    pub fn render(&mut self) -> anyhow::Result<bool> {
         self.with_handler(|handler, window| {
             match window.inner.begin_frame() {
                 Ok(true) => {}
                 Ok(false) => return Ok(false),
                 Err(error) => {
-                    handler.error(error.into())?;
+                    handler.error(error)?;
                     return Ok(false);
                 }
             }
@@ -167,23 +167,23 @@ impl Window for WgpuWindow {
         self.inner.device_pixel_ratio()
     }
 
-    fn resize_to(&mut self, width: i32, height: i32) -> Result<(), WindowError> {
+    fn resize_to(&mut self, width: i32, height: i32) -> anyhow::Result<()> {
         self.inner.resize_to(width, height)
     }
 
-    fn resize_by(&mut self, width: i32, height: i32) -> Result<(), WindowError> {
+    fn resize_by(&mut self, width: i32, height: i32) -> anyhow::Result<()> {
         self.inner.resize_by(width, height)
     }
 
-    fn move_to(&mut self, x: i32, y: i32) -> Result<(), WindowError> {
+    fn move_to(&mut self, x: i32, y: i32) -> anyhow::Result<()> {
         self.inner.move_to(x, y)
     }
 
-    fn move_by(&mut self, x: i32, y: i32) -> Result<(), WindowError> {
+    fn move_by(&mut self, x: i32, y: i32) -> anyhow::Result<()> {
         self.inner.move_by(x, y)
     }
 
-    fn maximize(&mut self) -> Result<(), WindowError> {
+    fn maximize(&mut self) -> anyhow::Result<()> {
         self.inner.maximize()
     }
 
@@ -191,7 +191,7 @@ impl Window for WgpuWindow {
         self.inner.is_maximized()
     }
 
-    fn minimize(&mut self) -> Result<(), WindowError> {
+    fn minimize(&mut self) -> anyhow::Result<()> {
         self.inner.minimize()
     }
 
@@ -199,11 +199,11 @@ impl Window for WgpuWindow {
         self.inner.is_minimized()
     }
 
-    fn restore(&mut self) -> Result<(), WindowError> {
+    fn restore(&mut self) -> anyhow::Result<()> {
         self.inner.restore()
     }
 
-    fn focus(&mut self) -> Result<(), WindowError> {
+    fn focus(&mut self) -> anyhow::Result<()> {
         self.inner.focus()
     }
 
@@ -211,24 +211,24 @@ impl Window for WgpuWindow {
         self.inner.is_focused()
     }
 
-    fn request_redraw(&mut self) -> Result<(), WindowError> {
+    fn request_redraw(&mut self) -> anyhow::Result<()> {
         self.inner.request_redraw()
     }
-    fn request_close(&mut self) -> Result<(), WindowError> {
+    fn request_close(&mut self) -> anyhow::Result<()> {
         self.inner.request_close()
     }
 
-    fn set_cursor(&mut self, cursor: WindowCursor) -> Result<(), WindowError> {
+    fn set_cursor(&mut self, cursor: WindowCursor) -> anyhow::Result<()> {
         self.inner.set_cursor(cursor)
     }
-    fn start_text_input(&mut self) -> Result<(), WindowError> {
+    fn start_text_input(&mut self) -> anyhow::Result<()> {
         self.inner.start_text_input()
     }
-    fn stop_text_input(&mut self) -> Result<(), WindowError> {
+    fn stop_text_input(&mut self) -> anyhow::Result<()> {
         self.inner.stop_text_input()
     }
 
-    fn fullscreen(&mut self, fullscreen: bool) -> Result<(), WindowError> {
+    fn fullscreen(&mut self, fullscreen: bool) -> anyhow::Result<()> {
         self.inner.fullscreen(fullscreen)
     }
 
@@ -236,7 +236,7 @@ impl Window for WgpuWindow {
         self.inner.is_fullscreen()
     }
 
-    fn borderless(&mut self, borderless: bool) -> Result<(), WindowError> {
+    fn borderless(&mut self, borderless: bool) -> anyhow::Result<()> {
         self.inner.borderless(borderless)
     }
 
@@ -244,18 +244,17 @@ impl Window for WgpuWindow {
         self.inner.is_borderless()
     }
 
-    fn raw_window_handle(&self) -> Result<WindowHandle<'_>, WindowError> {
+    fn raw_window_handle(&self) -> anyhow::Result<WindowHandle<'_>> {
         self.inner.raw_window_handle()
     }
 }
 
 impl WgpuWindow {
-    pub fn update(&mut self) -> Result<(), WindowError> {
+    pub fn update(&mut self) -> anyhow::Result<()> {
         self.with_handler(|handler, window| {
             let result = window
                 .inner
                 .refresh_metrics()
-                .map_err(anyhow::Error::from)
                 .and_then(|()| handler.update(window));
             result.or_else(|error| handler.error(error))
         })
@@ -269,34 +268,34 @@ impl WgpuWindow {
 // Retain native operations privately for future host needs.
 #[allow(dead_code)]
 impl WgpuWindow {
-    fn show_system_menu(&mut self, x: i32, y: i32) -> Result<(), WindowError> {
+    fn show_system_menu(&mut self, x: i32, y: i32) -> anyhow::Result<()> {
         self.inner.show_system_menu(x, y)
     }
 
-    fn get_pixel_density(&self) -> Result<f32, WindowError> {
+    fn get_pixel_density(&self) -> anyhow::Result<f32> {
         self.inner.get_pixel_density()
     }
 
-    fn get_display_scale(&self) -> Result<f32, WindowError> {
+    fn get_display_scale(&self) -> anyhow::Result<f32> {
         self.inner.get_display_scale()
     }
 
-    fn get_display(&self) -> Result<u32, WindowError> {
+    fn get_display(&self) -> anyhow::Result<u32> {
         self.inner.get_display()
     }
-    fn set_fullscreen_mode(&mut self, mode: Option<&WindowDisplayMode>) -> Result<(), WindowError> {
+    fn set_fullscreen_mode(&mut self, mode: Option<&WindowDisplayMode>) -> anyhow::Result<()> {
         self.inner.set_fullscreen_mode(mode)
     }
     fn get_fullscreen_mode(&self) -> Option<WindowDisplayMode> {
         self.inner.get_fullscreen_mode()
     }
-    fn get_icc_profile(&self) -> Result<Vec<u8>, WindowError> {
+    fn get_icc_profile(&self) -> anyhow::Result<Vec<u8>> {
         self.inner.get_icc_profile()
     }
-    fn get_pixel_format(&self) -> Result<WindowPixelFormat, WindowError> {
+    fn get_pixel_format(&self) -> anyhow::Result<WindowPixelFormat> {
         self.inner.get_pixel_format()
     }
-    fn get_properties(&self) -> Result<WindowPropertiesId, WindowError> {
+    fn get_properties(&self) -> anyhow::Result<WindowPropertiesId> {
         self.inner.get_properties()
     }
     fn is_hidden(&self) -> bool {
@@ -305,91 +304,91 @@ impl WgpuWindow {
     fn is_resizable(&self) -> bool {
         self.inner.is_resizable()
     }
-    fn set_title(&mut self, title: &str) -> Result<(), WindowError> {
+    fn set_title(&mut self, title: &str) -> anyhow::Result<()> {
         self.inner.set_title(title)
     }
     fn get_title(&self) -> String {
         self.inner.get_title()
     }
-    fn set_icon(&mut self, icon: &WindowSurfaceRef<'_>) -> Result<(), WindowError> {
+    fn set_icon(&mut self, icon: &WindowSurfaceRef<'_>) -> anyhow::Result<()> {
         self.inner.set_icon(icon)
     }
-    fn get_position(&self) -> Result<(i32, i32), WindowError> {
+    fn get_position(&self) -> anyhow::Result<(i32, i32)> {
         self.inner.get_position()
     }
-    fn get_size(&self) -> Result<(i32, i32), WindowError> {
+    fn get_size(&self) -> anyhow::Result<(i32, i32)> {
         self.inner.get_size()
     }
-    fn get_safe_area(&self) -> Result<WindowRect, WindowError> {
+    fn get_safe_area(&self) -> anyhow::Result<WindowRect> {
         self.inner.get_safe_area()
     }
-    fn set_aspect_ratio(&mut self, min_aspect: f32, max_aspect: f32) -> Result<(), WindowError> {
+    fn set_aspect_ratio(&mut self, min_aspect: f32, max_aspect: f32) -> anyhow::Result<()> {
         self.inner.set_aspect_ratio(min_aspect, max_aspect)
     }
-    fn get_aspect_ratio(&self) -> Result<(f32, f32), WindowError> {
+    fn get_aspect_ratio(&self) -> anyhow::Result<(f32, f32)> {
         self.inner.get_aspect_ratio()
     }
-    fn get_borders_size(&self) -> Result<(i32, i32, i32, i32), WindowError> {
+    fn get_borders_size(&self) -> anyhow::Result<(i32, i32, i32, i32)> {
         self.inner.get_borders_size()
     }
-    fn get_size_in_pixels(&self) -> Result<(i32, i32), WindowError> {
+    fn get_size_in_pixels(&self) -> anyhow::Result<(i32, i32)> {
         self.inner.get_size_in_pixels()
     }
-    fn set_minimum_size(&mut self, width: i32, height: i32) -> Result<(), WindowError> {
+    fn set_minimum_size(&mut self, width: i32, height: i32) -> anyhow::Result<()> {
         self.inner.set_minimum_size(width, height)
     }
-    fn get_minimum_size(&self) -> Result<(i32, i32), WindowError> {
+    fn get_minimum_size(&self) -> anyhow::Result<(i32, i32)> {
         self.inner.get_minimum_size()
     }
-    fn set_maximum_size(&mut self, width: i32, height: i32) -> Result<(), WindowError> {
+    fn set_maximum_size(&mut self, width: i32, height: i32) -> anyhow::Result<()> {
         self.inner.set_maximum_size(width, height)
     }
-    fn get_maximum_size(&self) -> Result<(i32, i32), WindowError> {
+    fn get_maximum_size(&self) -> anyhow::Result<(i32, i32)> {
         self.inner.get_maximum_size()
     }
-    fn set_resizable(&mut self, resizable: bool) -> Result<(), WindowError> {
+    fn set_resizable(&mut self, resizable: bool) -> anyhow::Result<()> {
         self.inner.set_resizable(resizable)
     }
-    fn set_always_on_top(&mut self, on_top: bool) -> Result<(), WindowError> {
+    fn set_always_on_top(&mut self, on_top: bool) -> anyhow::Result<()> {
         self.inner.set_always_on_top(on_top)
     }
-    fn set_fill_document(&mut self, fill: bool) -> Result<(), WindowError> {
+    fn set_fill_document(&mut self, fill: bool) -> anyhow::Result<()> {
         self.inner.set_fill_document(fill)
     }
-    fn show(&mut self) -> Result<(), WindowError> {
+    fn show(&mut self) -> anyhow::Result<()> {
         self.inner.show()
     }
-    fn hide(&mut self) -> Result<(), WindowError> {
+    fn hide(&mut self) -> anyhow::Result<()> {
         self.inner.hide()
     }
-    fn sync(&mut self) -> Result<(), WindowError> {
+    fn sync(&mut self) -> anyhow::Result<()> {
         self.inner.sync()
     }
     fn has_surface(&self) -> bool {
         self.inner.has_surface()
     }
-    fn get_surface(&mut self) -> Result<WindowSurfaceRef<'_>, WindowError> {
+    fn get_surface(&mut self) -> anyhow::Result<WindowSurfaceRef<'_>> {
         self.inner.get_surface()
     }
-    fn set_surface_vsync(&mut self, vsync: i32) -> Result<(), WindowError> {
+    fn set_surface_vsync(&mut self, vsync: i32) -> anyhow::Result<()> {
         self.inner.set_surface_vsync(vsync)
     }
-    fn get_surface_vsync(&self) -> Result<i32, WindowError> {
+    fn get_surface_vsync(&self) -> anyhow::Result<i32> {
         self.inner.get_surface_vsync()
     }
-    fn update_surface(&mut self) -> Result<(), WindowError> {
+    fn update_surface(&mut self) -> anyhow::Result<()> {
         self.inner.update_surface()
     }
-    fn update_surface_rects(&mut self, rects: &[WindowRect]) -> Result<(), WindowError> {
+    fn update_surface_rects(&mut self, rects: &[WindowRect]) -> anyhow::Result<()> {
         self.inner.update_surface_rects(rects)
     }
-    fn destroy_surface(&mut self) -> Result<(), WindowError> {
+    fn destroy_surface(&mut self) -> anyhow::Result<()> {
         self.inner.destroy_surface()
     }
-    fn set_keyboard_grab(&mut self, grabbed: bool) -> Result<(), WindowError> {
+    fn set_keyboard_grab(&mut self, grabbed: bool) -> anyhow::Result<()> {
         self.inner.set_keyboard_grab(grabbed)
     }
-    fn set_mouse_grab(&mut self, grabbed: bool) -> Result<(), WindowError> {
+    fn set_mouse_grab(&mut self, grabbed: bool) -> anyhow::Result<()> {
         self.inner.set_mouse_grab(grabbed)
     }
     fn get_keyboard_grab(&self) -> bool {
@@ -398,40 +397,40 @@ impl WgpuWindow {
     fn get_mouse_grab(&self) -> bool {
         self.inner.get_mouse_grab()
     }
-    fn set_mouse_rect(&mut self, rect: Option<&WindowRect>) -> Result<(), WindowError> {
+    fn set_mouse_rect(&mut self, rect: Option<&WindowRect>) -> anyhow::Result<()> {
         self.inner.set_mouse_rect(rect)
     }
     fn get_mouse_rect(&self) -> Option<WindowRect> {
         self.inner.get_mouse_rect()
     }
-    fn set_opacity(&mut self, opacity: f32) -> Result<(), WindowError> {
+    fn set_opacity(&mut self, opacity: f32) -> anyhow::Result<()> {
         self.inner.set_opacity(opacity)
     }
-    fn get_opacity(&self) -> Result<f32, WindowError> {
+    fn get_opacity(&self) -> anyhow::Result<f32> {
         self.inner.get_opacity()
     }
-    fn set_focusable(&mut self, focusable: bool) -> Result<(), WindowError> {
+    fn set_focusable(&mut self, focusable: bool) -> anyhow::Result<()> {
         self.inner.set_focusable(focusable)
     }
-    fn set_shape(&mut self, shape: Option<&WindowSurfaceRef<'_>>) -> Result<(), WindowError> {
+    fn set_shape(&mut self, shape: Option<&WindowSurfaceRef<'_>>) -> anyhow::Result<()> {
         self.inner.set_shape(shape)
     }
-    fn flash(&mut self, operation: WindowFlashOperation) -> Result<(), WindowError> {
+    fn flash(&mut self, operation: WindowFlashOperation) -> anyhow::Result<()> {
         self.inner.flash(operation)
     }
-    fn set_progress_state(&mut self, state: WindowProgressState) -> Result<(), WindowError> {
+    fn set_progress_state(&mut self, state: WindowProgressState) -> anyhow::Result<()> {
         self.inner.set_progress_state(state)
     }
-    fn get_progress_state(&self) -> Result<WindowProgressState, WindowError> {
+    fn get_progress_state(&self) -> anyhow::Result<WindowProgressState> {
         self.inner.get_progress_state()
     }
-    fn set_progress_value(&mut self, value: f32) -> Result<(), WindowError> {
+    fn set_progress_value(&mut self, value: f32) -> anyhow::Result<()> {
         self.inner.set_progress_value(value)
     }
-    fn get_progress_value(&self) -> Result<f32, WindowError> {
+    fn get_progress_value(&self) -> anyhow::Result<f32> {
         self.inner.get_progress_value()
     }
-    fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, WindowError> {
+    fn display_handle(&self) -> anyhow::Result<raw_window_handle::DisplayHandle<'_>> {
         self.inner.display_handle()
     }
 }
@@ -440,7 +439,7 @@ impl WgpuWindow {
     pub(super) fn initialize<H: WindowHandler<Self> + 'static>(
         inner: Self,
         handler: H,
-    ) -> Result<Self, WindowError> {
+    ) -> anyhow::Result<Self> {
         let mut window = inner;
         window.handler = Some(Box::new(handler));
         window.with_handler(|handler, window| {
@@ -453,7 +452,7 @@ impl WgpuWindow {
     fn with_handler<T>(
         &mut self,
         callback: impl FnOnce(&mut dyn WindowHandler<Self>, &mut Self) -> anyhow::Result<T>,
-    ) -> Result<T, WindowError> {
+    ) -> anyhow::Result<T> {
         let mut handler = self
             .handler
             .take()
@@ -462,12 +461,10 @@ impl WgpuWindow {
         if self.handler.is_none() {
             self.handler = Some(handler);
         } else if result.is_ok() {
-            return Err(WindowError::Nul(
-                "the callback replaced the active window".into(),
-            ));
+            return Err(WindowError::Nul("the callback replaced the active window".into()).into());
         }
         match result {
-            Ok(result) => result.map_err(WindowError::Callback),
+            Ok(result) => result.map_err(|error| WindowError::Callback(error).into()),
             Err(payload) => resume_unwind(payload),
         }
     }
@@ -522,7 +519,7 @@ impl<H> WgpuWindowBuilder<H> {
 }
 
 impl<H: WindowHandler<WgpuWindow> + 'static> WgpuWindowBuilder<H> {
-    pub fn build(self) -> Result<WgpuWindow, WindowError> {
+    pub fn build(self) -> anyhow::Result<WgpuWindow> {
         let native = match self.context {
             Some(context) => sdl::SdlInstance { context },
             None => sdl::init()?,

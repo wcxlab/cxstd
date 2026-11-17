@@ -1,7 +1,6 @@
-use anyhow::Result;
 use cxstd::ecs::Ecs;
 
-pub fn ecs<C: 'static>() -> Result<(tokio::runtime::Runtime, Ecs<C>)> {
+pub fn ecs<C: 'static>() -> anyhow::Result<(tokio::runtime::Runtime, Ecs<C>)> {
     let runtime = tokio::runtime::Runtime::new()?;
     let ecs = {
         let _entered = runtime.enter();

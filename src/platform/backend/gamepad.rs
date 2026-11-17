@@ -3,14 +3,13 @@
 use std::{cell::Cell, ffi::CStr, ptr::NonNull, rc::Rc, time::Duration};
 
 use crate::gamepad::{GamepadButton, GamepadInfo, GamepadState, GamepadType};
-use anyhow::Result;
 
 pub(crate) struct Gamepads {
     slots: Vec<Option<Device>>,
 }
 
 impl Gamepads {
-    pub fn new() -> Result<Self> {
+    pub fn new() -> anyhow::Result<Self> {
         if !unsafe { sdl3_sys::init::SDL_InitSubSystem(sdl3_sys::init::SDL_INIT_GAMEPAD) } {
             anyhow::bail!(sdl_error());
         }
@@ -85,7 +84,7 @@ impl Gamepads {
         &mut self,
         id: sdl3_sys::joystick::SDL_JoystickID,
         timestamp: Duration,
-    ) -> Result<Rc<GamepadState>> {
+    ) -> anyhow::Result<Rc<GamepadState>> {
         if let Some(device) = self.slots.iter().flatten().find(|device| device.id == id) {
             return Ok(device.state.clone());
         }

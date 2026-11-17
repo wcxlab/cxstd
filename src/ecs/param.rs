@@ -13,7 +13,6 @@ use super::{
     CommandQueue, Component, EcsContext, EntityId, EventDispatcher, Res, ResMut, Resource,
     Resources, TaskExecutor, World,
 };
-use anyhow::Result;
 
 /// Independently borrowed owners supplied when fetching function parameters.
 pub struct SystemInput<'w, C> {
@@ -35,8 +34,8 @@ impl<C> Clone for SystemInput<'_, C> {
 pub trait SystemParam<C: 'static = ()>: Sized {
     type Item<'w>;
 
-    fn access(access: &mut SystemAccess) -> Result<()>;
-    fn fetch(input: SystemInput<'_, C>) -> Result<Self::Item<'_>>;
+    fn access(access: &mut SystemAccess) -> anyhow::Result<()>;
+    fn fetch(input: SystemInput<'_, C>) -> anyhow::Result<Self::Item<'_>>;
 }
 
 /// Component and resource access declared by one system. Shared reads may repeat;
@@ -48,19 +47,19 @@ pub struct SystemAccess {
 }
 
 impl SystemAccess {
-    pub fn component<T: Component>(&mut self, mutable: bool) -> Result<()> {
+    pub fn component<T: Component>(&mut self, mutable: bool) -> anyhow::Result<()> {
         self.components.add::<T>(mutable)
     }
 
-    pub fn resource<T: Resource>(&mut self, mutable: bool) -> Result<()> {
+    pub fn resource<T: Resource>(&mut self, mutable: bool) -> anyhow::Result<()> {
         self.resources.add::<T>(mutable)
     }
 
-    pub fn read_world(&mut self) -> Result<()> {
+    pub fn read_world(&mut self) -> anyhow::Result<()> {
         self.components.read_all()
     }
 
-    pub fn read_resources(&mut self) -> Result<()> {
+    pub fn read_resources(&mut self) -> anyhow::Result<()> {
         self.resources.read_all()
     }
 }
@@ -72,7 +71,7 @@ struct AccessSet {
 }
 
 impl AccessSet {
-    fn add<T: 'static>(&mut self, mutable: bool) -> Result<()> {
+    fn add<T: 'static>(&mut self, mutable: bool) -> anyhow::Result<()> {
         let previous = self.types.get(&TypeId::of::<T>());
         ensure!(
             !(mutable && self.shared_all) && !previous.is_some_and(|&write| write || mutable),
@@ -83,7 +82,7 @@ impl AccessSet {
         Ok(())
     }
 
-    fn read_all(&mut self) -> Result<()> {
+    fn read_all(&mut self) -> anyhow::Result<()> {
         ensure!(
             !self.types.values().any(|&write| write),
             "shared owner access conflicts with a mutable parameter"
@@ -96,11 +95,11 @@ impl AccessSet {
 impl<C: 'static, T: Resource> SystemParam<C> for Res<'_, T> {
     type Item<'w> = Res<'w, T>;
 
-    fn access(access: &mut SystemAccess) -> Result<()> {
+    fn access(access: &mut SystemAccess) -> anyhow::Result<()> {
         access.resource::<T>(false)
     }
 
-    fn fetch(input: SystemInput<'_, C>) -> Result<Self::Item<'_>> {
+    fn fetch(input: SystemInput<'_, C>) -> anyhow::Result<Self::Item<'_>> {
         input.access.resources.get::<T>()
     }
 }
@@ -108,11 +107,11 @@ impl<C: 'static, T: Resource> SystemParam<C> for Res<'_, T> {
 impl<C: 'static, T: Resource> SystemParam<C> for ResMut<'_, T> {
     type Item<'w> = ResMut<'w, T>;
 
-    fn access(access: &mut SystemAccess) -> Result<()> {
+    fn access(access: &mut SystemAccess) -> anyhow::Result<()> {
         access.resource::<T>(true)
     }
 
-    fn fetch(input: SystemInput<'_, C>) -> Result<Self::Item<'_>> {
+    fn fetch(input: SystemInput<'_, C>) -> anyhow::Result<Self::Item<'_>> {
         input.access.resources.get_mut::<T>()
     }
 }
@@ -120,11 +119,11 @@ impl<C: 'static, T: Resource> SystemParam<C> for ResMut<'_, T> {
 impl<C: 'static> SystemParam<C> for &World {
     type Item<'w> = &'w World;
 
-    fn access(access: &mut SystemAccess) -> Result<()> {
+    fn access(access: &mut SystemAccess) -> anyhow::Result<()> {
         access.read_world()
     }
 
-    fn fetch(input: SystemInput<'_, C>) -> Result<Self::Item<'_>> {
+    fn fetch(input: SystemInput<'_, C>) -> anyhow::Result<Self::Item<'_>> {
         Ok(input.world)
     }
 }
@@ -132,11 +131,11 @@ impl<C: 'static> SystemParam<C> for &World {
 impl<C: 'static> SystemParam<C> for &Resources {
     type Item<'w> = &'w Resources;
 
-    fn access(access: &mut SystemAccess) -> Result<()> {
+    fn access(access: &mut SystemAccess) -> anyhow::Result<()> {
         access.read_resources()
     }
 
-    fn fetch(input: SystemInput<'_, C>) -> Result<Self::Item<'_>> {
+    fn fetch(input: SystemInput<'_, C>) -> anyhow::Result<Self::Item<'_>> {
         Ok(input.access.resources)
     }
 }
@@ -144,11 +143,11 @@ impl<C: 'static> SystemParam<C> for &Resources {
 impl<C: 'static> SystemParam<C> for CommandQueue<C> {
     type Item<'w> = CommandQueue<C>;
 
-    fn access(_: &mut SystemAccess) -> Result<()> {
+    fn access(_: &mut SystemAccess) -> anyhow::Result<()> {
         Ok(())
     }
 
-    fn fetch(input: SystemInput<'_, C>) -> Result<Self::Item<'_>> {
+    fn fetch(input: SystemInput<'_, C>) -> anyhow::Result<Self::Item<'_>> {
         Ok(input.access.command_queue())
     }
 }
@@ -156,11 +155,11 @@ impl<C: 'static> SystemParam<C> for CommandQueue<C> {
 impl<C: 'static> SystemParam<C> for &TaskExecutor {
     type Item<'w> = &'w TaskExecutor;
 
-    fn access(_: &mut SystemAccess) -> Result<()> {
+    fn access(_: &mut SystemAccess) -> anyhow::Result<()> {
         Ok(())
     }
 
-    fn fetch(input: SystemInput<'_, C>) -> Result<Self::Item<'_>> {
+    fn fetch(input: SystemInput<'_, C>) -> anyhow::Result<Self::Item<'_>> {
         Ok(input.access.task_executor())
     }
 }
@@ -168,11 +167,11 @@ impl<C: 'static> SystemParam<C> for &TaskExecutor {
 impl<C: 'static> SystemParam<C> for &EventDispatcher<EntityId, World, C> {
     type Item<'w> = &'w EventDispatcher<EntityId, World, C>;
 
-    fn access(_: &mut SystemAccess) -> Result<()> {
+    fn access(_: &mut SystemAccess) -> anyhow::Result<()> {
         Ok(())
     }
 
-    fn fetch(input: SystemInput<'_, C>) -> Result<Self::Item<'_>> {
+    fn fetch(input: SystemInput<'_, C>) -> anyhow::Result<Self::Item<'_>> {
         Ok(input.access.events)
     }
 }
@@ -182,12 +181,12 @@ macro_rules! impl_params {
         impl<Host: 'static, $($p: SystemParam<Host>),*> SystemParam<Host> for ($($p,)*) {
             type Item<'w> = ($($p::Item<'w>,)*);
 
-            fn access(_access: &mut SystemAccess) -> Result<()> {
+            fn access(_access: &mut SystemAccess) -> anyhow::Result<()> {
                 $($p::access(_access)?;)*
                 Ok(())
             }
 
-            fn fetch(_input: SystemInput<'_, Host>) -> Result<Self::Item<'_>> {
+            fn fetch(_input: SystemInput<'_, Host>) -> anyhow::Result<Self::Item<'_>> {
                 Ok(($($p::fetch(_input)?,)*))
             }
         }

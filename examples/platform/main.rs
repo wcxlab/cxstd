@@ -2,13 +2,11 @@
 //! Open an 800x600 logical-pixel window and print received events.
 //! Left-click within x=100..700, y=100..500 to enable IME; click outside to disable it.
 
-use std::time::Duration;
-
-use anyhow::Result;
 use cxstd::KeyCode;
 use cxstd::platform::Platform;
 use cxstd::platform::{PlatformEvent, PlatformEventMessage};
 use cxstd::window::{WgpuWindow, Window, WindowHandler};
+use std::time::Duration;
 
 #[derive(Default)]
 struct MainWindow {
@@ -46,7 +44,7 @@ impl WindowHandler<WgpuWindow> for MainWindow {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
     let mut platform = Platform::new()?;
     platform.gamepad().get_gamepads()?;
     let mut window = platform

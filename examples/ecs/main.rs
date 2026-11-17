@@ -6,15 +6,13 @@
 
 mod app_core;
 mod app_view;
-
-use anyhow::Result;
 use std::time::Duration;
 
 use app_core::AppCore;
 use app_view::AppView;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
     let mut app_core = AppCore::new()?;
     let mut app_view = AppView::new()?;
     let mut interval = tokio::time::interval(Duration::from_secs(1));

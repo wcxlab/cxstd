@@ -1,3 +1,4 @@
+use cxstd::ecs::{TaskExecutor, TaskScope};
 use std::{
     cell::Cell,
     future::{pending, poll_fn},
@@ -6,10 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
-use cxstd::ecs::{TaskExecutor, TaskScope};
-
-fn executor() -> Result<(tokio::runtime::Runtime, TaskExecutor)> {
+fn executor() -> anyhow::Result<(tokio::runtime::Runtime, TaskExecutor)> {
     let host = tokio::runtime::Runtime::new()?;
     let executor = {
         let _entered = host.enter();
@@ -36,7 +34,7 @@ fn construction_requires_a_host_runtime() {
 }
 
 #[test]
-fn background_completion_waits_for_owner_update_outside_tokio_scope() -> Result<()> {
+fn background_completion_waits_for_owner_update_outside_tokio_scope() -> anyhow::Result<()> {
     let (_host, executor) = executor()?;
     let output = Rc::new(Cell::new(0));
     let completed = output.clone();
@@ -58,14 +56,14 @@ fn background_completion_waits_for_owner_update_outside_tokio_scope() -> Result<
 }
 
 #[test]
-fn non_send_foreground_tasks_are_polled_only_when_runnable() -> Result<()> {
+fn non_send_foreground_tasks_are_polled_only_when_runnable() -> anyhow::Result<()> {
     let (_host, executor) = executor()?;
     let polls = Rc::new(Cell::new(0));
     let observed = polls.clone();
-    let task = executor.spawn_local(poll_fn(move |cx| {
+    let task = executor.spawn_local(poll_fn(move |ctx| {
         observed.set(observed.get() + 1);
         if observed.get() == 1 {
-            cx.waker().wake_by_ref();
+            ctx.waker().wake_by_ref();
             Poll::Pending
         } else {
             Poll::Ready(Rc::new(7))
@@ -82,7 +80,7 @@ fn non_send_foreground_tasks_are_polled_only_when_runnable() -> Result<()> {
 }
 
 #[test]
-fn foreground_timers_use_the_captured_host_runtime() -> Result<()> {
+fn foreground_timers_use_the_captured_host_runtime() -> anyhow::Result<()> {
     let (_host, executor) = executor()?;
     let task = executor.spawn_local(async {
         tokio::time::sleep(Duration::from_millis(1)).await;
@@ -98,7 +96,7 @@ fn foreground_timers_use_the_captured_host_runtime() -> Result<()> {
 }
 
 #[test]
-fn deferred_callbacks_consume_one_batch_per_explicit_update() -> Result<()> {
+fn deferred_callbacks_consume_one_batch_per_explicit_update() -> anyhow::Result<()> {
     let (_host, executor) = executor()?;
     let calls = Rc::new(Cell::new(0));
     let next_runtime = executor.clone();
@@ -117,7 +115,7 @@ fn deferred_callbacks_consume_one_batch_per_explicit_update() -> Result<()> {
 }
 
 #[test]
-fn cross_thread_callbacks_keep_queued_payloads_alive_until_owner_delivery() -> Result<()> {
+fn cross_thread_callbacks_keep_queued_payloads_alive_until_owner_delivery() -> anyhow::Result<()> {
     let (_host, executor) = executor()?;
     let value = Rc::new(Cell::new(0));
     let delivered = value.clone();
@@ -130,12 +128,12 @@ fn cross_thread_callbacks_keep_queued_payloads_alive_until_owner_delivery() -> R
     assert_eq!(value.get(), 9);
     let late = executor.bind(|_: ()| panic!("closed callback must not run"));
     executor.close();
-    assert!(late.send(()).is_err());
+    assert!(late.send(()).unwrap_err().is::<cxstd::ecs::AsyncClosed>());
     Ok(())
 }
 
 #[test]
-fn scopes_cancel_foreground_tasks_and_reject_late_spawns() -> Result<()> {
+fn scopes_cancel_foreground_tasks_and_reject_late_spawns() -> anyhow::Result<()> {
     let (_host, executor) = executor()?;
     let scope = TaskScope::new();
     let task = executor.spawn_local_scoped(pending::<()>(), Some(scope.clone()))?;
@@ -144,15 +142,40 @@ fn scopes_cancel_foreground_tasks_and_reject_late_spawns() -> Result<()> {
     executor.update();
     assert!(task.is_finished());
     assert_eq!(scope.task_count(), 0);
-    assert!(executor.spawn_local_scoped(async {}, Some(scope)).is_err());
+    assert!(
+        executor
+            .spawn_local_scoped(async {}, Some(scope))
+            .err()
+            .unwrap()
+            .is::<cxstd::ecs::AsyncClosed>()
+    );
     executor.close();
-    assert!(executor.spawn(async {}, |_| {}).is_err());
-    assert!(executor.spawn_local(async {}).is_err());
+    assert!(
+        executor
+            .spawn(async {}, |_| {})
+            .err()
+            .unwrap()
+            .is::<cxstd::ecs::AsyncClosed>()
+    );
+    assert!(
+        executor
+            .spawn_local(async {})
+            .err()
+            .unwrap()
+            .is::<cxstd::ecs::AsyncClosed>()
+    );
+    assert!(
+        executor
+            .spawn_awaitable(async {})
+            .err()
+            .unwrap()
+            .is::<cxstd::ecs::AsyncClosed>()
+    );
     Ok(())
 }
 
 #[test]
-fn closing_during_update_stops_remaining_deferred_callbacks() -> Result<()> {
+fn closing_during_update_stops_remaining_deferred_callbacks() -> anyhow::Result<()> {
     let (_host, executor) = executor()?;
     let closer = executor.clone();
     executor.defer(move || closer.close());
@@ -162,7 +185,7 @@ fn closing_during_update_stops_remaining_deferred_callbacks() -> Result<()> {
 }
 
 #[test]
-fn nested_updates_leave_newly_deferred_work_for_the_next_outer_update() -> Result<()> {
+fn nested_updates_leave_newly_deferred_work_for_the_next_outer_update() -> anyhow::Result<()> {
     let (_host, executor) = executor()?;
     let nested = executor.clone();
     let calls = Rc::new(Cell::new(0));
@@ -180,7 +203,7 @@ fn nested_updates_leave_newly_deferred_work_for_the_next_outer_update() -> Resul
 }
 
 #[test]
-fn a_foreground_task_can_close_its_executor_without_being_reinserted() -> Result<()> {
+fn a_foreground_task_can_close_its_executor_without_being_reinserted() -> anyhow::Result<()> {
     let (_host, executor) = executor()?;
     let closer = executor.clone();
     let task = executor.spawn_local(async move {
@@ -194,7 +217,7 @@ fn a_foreground_task_can_close_its_executor_without_being_reinserted() -> Result
 }
 
 #[test]
-fn cancellation_scope_can_track_tasks_from_multiple_executors() -> Result<()> {
+fn cancellation_scope_can_track_tasks_from_multiple_executors() -> anyhow::Result<()> {
     let (host, first) = executor()?;
     let second = {
         let _entered = host.enter();
@@ -217,7 +240,7 @@ fn cancellation_scope_can_track_tasks_from_multiple_executors() -> Result<()> {
 }
 
 #[test]
-fn detached_background_tasks_release_scopes_on_success_and_panic() -> Result<()> {
+fn detached_background_tasks_release_scopes_on_success_and_panic() -> anyhow::Result<()> {
     let (_host, executor) = executor()?;
     let scope = TaskScope::new();
     let background = executor.scoped_background_executor(scope.clone());

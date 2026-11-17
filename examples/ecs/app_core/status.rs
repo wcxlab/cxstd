@@ -1,5 +1,6 @@
 //! `StatusPlugin::default()` registers update timing and a shared asynchronous counter.
 
+use cxstd::ecs::{Plugin, PluginContext, ResMut, Resource};
 use std::{
     sync::{
         Arc,
@@ -8,22 +9,21 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
-use cxstd::ecs::{Ecs, Plugin, ResMut, Resource};
-
 #[derive(Default)]
 pub(super) struct StatusPlugin;
 
 impl Plugin for StatusPlugin {
-    fn load(&mut self, ecs: &mut Ecs) -> Result<()> {
-        ecs.add_resource(Status {
+    type LoadParams = ();
+
+    fn load(&mut self, ctx: PluginContext, _deps: ()) -> anyhow::Result<()> {
+        ctx.add_resource(Status {
             current_time: Instant::now(),
             update_duration: Duration::ZERO,
             counter: Arc::new(AtomicU64::new(0)),
-        })?;
-        ecs.add_system("pre_update", begin_update_system);
-        ecs.add_schedule("update");
-        ecs.add_system("post_update", finish_update_system);
+        });
+        ctx.add_system("pre_update", begin_update_system);
+        ctx.add_schedule("update");
+        ctx.add_system("post_update", finish_update_system);
         Ok(())
     }
 }
@@ -51,10 +51,12 @@ impl Status {
     }
 }
 
-fn begin_update_system(mut status: ResMut<Status>) {
+fn begin_update_system(_: cxstd::ecs::SystemContext, deps: ResMut<Status>) {
+    let mut status = deps;
     status.current_time = Instant::now();
 }
 
-fn finish_update_system(mut status: ResMut<Status>) {
+fn finish_update_system(_: cxstd::ecs::SystemContext, deps: ResMut<Status>) {
+    let mut status = deps;
     status.update_duration = status.current_time.elapsed();
 }

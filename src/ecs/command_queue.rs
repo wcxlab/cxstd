@@ -3,9 +3,8 @@
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use super::{Component, EcsContext, Entity, EntityId, EntityRef, World};
-use anyhow::Result;
 
-type Command<C> = Box<dyn FnOnce(&mut World, &mut C, EcsContext<'_, C>) -> Result<()>>;
+type Command<C> = Box<dyn FnOnce(&mut World, &mut C, EcsContext<'_, C>) -> anyhow::Result<()>>;
 
 /// A cloneable owner-thread queue for deferred entity and application changes.
 pub struct CommandQueue<C = ()> {
@@ -30,14 +29,14 @@ impl<C> Default for CommandQueue<C> {
 
 impl<C> CommandQueue<C> {
     /// Queue work without retaining a borrow of the World.
-    pub fn queue(&self, command: impl FnOnce(&mut World, &mut C) -> Result<()> + 'static) {
+    pub fn queue(&self, command: impl FnOnce(&mut World, &mut C) -> anyhow::Result<()> + 'static) {
         self.queue_with(move |world, host, _| command(world, host));
     }
 
     /// Queue work that also needs the executing Ecs's resources or facilities.
     pub fn queue_with(
         &self,
-        command: impl FnOnce(&mut World, &mut C, EcsContext<'_, C>) -> Result<()> + 'static,
+        command: impl FnOnce(&mut World, &mut C, EcsContext<'_, C>) -> anyhow::Result<()> + 'static,
     ) {
         self.pending.borrow_mut().push_back(Box::new(command));
     }
@@ -58,7 +57,7 @@ impl<C> CommandQueue<C> {
         world: &mut World,
         context: &mut C,
         access: EcsContext<'_, C>,
-    ) -> Result<usize> {
+    ) -> anyhow::Result<usize> {
         let mut batch = std::mem::take(&mut *self.pending.borrow_mut());
         let mut applied = 0;
         while let Some(command) = batch.pop_front() {

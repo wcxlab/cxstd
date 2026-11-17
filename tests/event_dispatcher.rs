@@ -94,7 +94,7 @@ fn target_liveness_is_checked_again_between_callbacks() {
         calls: Vec::new(),
     };
     assert_eq!(
-        events.dispatch_if(&mut context, |key, cx| cx.live.contains(key)),
+        events.dispatch_if(&mut context, |key, ctx| ctx.live.contains(key)),
         1
     );
     assert_eq!(context.calls, [1]);

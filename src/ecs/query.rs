@@ -6,16 +6,15 @@ use anyhow::ensure;
 
 use super::{Component, EntityId, SystemAccess, SystemInput, SystemParam, World};
 use crate::{Ref, RefMut};
-use anyhow::Result;
 
 /// The component access and fetched item for one entity. Tuples combine fields
 /// with AND semantics; EntityId may be included without selecting a component.
 pub trait QueryData {
     type Item<'w>;
 
-    fn access(access: &mut SystemAccess) -> Result<()>;
+    fn access(access: &mut SystemAccess) -> anyhow::Result<()>;
     fn matches(world: &World, entity: EntityId) -> bool;
-    fn fetch(world: &World, entity: EntityId) -> Result<Self::Item<'_>>;
+    fn fetch(world: &World, entity: EntityId) -> anyhow::Result<Self::Item<'_>>;
 }
 
 /// Query data that can be fetched repeatedly through shared Query access.
@@ -39,7 +38,7 @@ impl<D: QueryData> Query<'_, D> {
         })
     }
 
-    pub fn get_mut(&mut self, entity: EntityId) -> Result<D::Item<'_>> {
+    pub fn get_mut(&mut self, entity: EntityId) -> anyhow::Result<D::Item<'_>> {
         ensure!(
             self.world.contains(entity) && D::matches(self.world, entity),
             "entity does not match this query"
@@ -59,7 +58,7 @@ impl<D: ReadOnlyQueryData> Query<'_, D> {
         })
     }
 
-    pub fn get(&self, entity: EntityId) -> Result<D::Item<'_>> {
+    pub fn get(&self, entity: EntityId) -> anyhow::Result<D::Item<'_>> {
         ensure!(
             self.world.contains(entity) && D::matches(self.world, entity),
             "entity does not match this query"
@@ -71,11 +70,11 @@ impl<D: ReadOnlyQueryData> Query<'_, D> {
 impl<C: 'static, D: QueryData + 'static> SystemParam<C> for Query<'_, D> {
     type Item<'w> = Query<'w, D>;
 
-    fn access(access: &mut SystemAccess) -> Result<()> {
+    fn access(access: &mut SystemAccess) -> anyhow::Result<()> {
         D::access(access)
     }
 
-    fn fetch(input: SystemInput<'_, C>) -> Result<Self::Item<'_>> {
+    fn fetch(input: SystemInput<'_, C>) -> anyhow::Result<Self::Item<'_>> {
         Ok(Query {
             world: input.world,
             marker: PhantomData,
@@ -86,13 +85,13 @@ impl<C: 'static, D: QueryData + 'static> SystemParam<C> for Query<'_, D> {
 impl<C: Component> QueryData for &C {
     type Item<'w> = Ref<'w, C>;
 
-    fn access(access: &mut SystemAccess) -> Result<()> {
+    fn access(access: &mut SystemAccess) -> anyhow::Result<()> {
         access.component::<C>(false)
     }
     fn matches(world: &World, entity: EntityId) -> bool {
         world.has_component::<C>(entity)
     }
-    fn fetch(world: &World, entity: EntityId) -> Result<Self::Item<'_>> {
+    fn fetch(world: &World, entity: EntityId) -> anyhow::Result<Self::Item<'_>> {
         world.component::<C>(entity)
     }
 }
@@ -102,13 +101,13 @@ impl<C: Component> ReadOnlyQueryData for &C {}
 impl<C: Component> QueryData for &mut C {
     type Item<'w> = RefMut<'w, C>;
 
-    fn access(access: &mut SystemAccess) -> Result<()> {
+    fn access(access: &mut SystemAccess) -> anyhow::Result<()> {
         access.component::<C>(true)
     }
     fn matches(world: &World, entity: EntityId) -> bool {
         world.has_component::<C>(entity)
     }
-    fn fetch(world: &World, entity: EntityId) -> Result<Self::Item<'_>> {
+    fn fetch(world: &World, entity: EntityId) -> anyhow::Result<Self::Item<'_>> {
         world.borrow_component_mut::<C>(entity)
     }
 }
@@ -116,13 +115,13 @@ impl<C: Component> QueryData for &mut C {
 impl QueryData for EntityId {
     type Item<'w> = EntityId;
 
-    fn access(_: &mut SystemAccess) -> Result<()> {
+    fn access(_: &mut SystemAccess) -> anyhow::Result<()> {
         Ok(())
     }
     fn matches(world: &World, entity: EntityId) -> bool {
         world.contains(entity)
     }
-    fn fetch(_: &World, entity: EntityId) -> Result<Self::Item<'_>> {
+    fn fetch(_: &World, entity: EntityId) -> anyhow::Result<Self::Item<'_>> {
         Ok(entity)
     }
 }
@@ -134,7 +133,7 @@ macro_rules! impl_query_data {
         impl<$($p: QueryData),*> QueryData for ($($p,)*) {
             type Item<'w> = ($($p::Item<'w>,)*);
 
-            fn access(_access: &mut SystemAccess) -> Result<()> {
+            fn access(_access: &mut SystemAccess) -> anyhow::Result<()> {
                 $($p::access(_access)?;)*
                 Ok(())
             }
@@ -143,7 +142,7 @@ macro_rules! impl_query_data {
                 true $(&& $p::matches(_world, _entity))*
             }
 
-            fn fetch(_world: &World, _entity: EntityId) -> Result<Self::Item<'_>> {
+            fn fetch(_world: &World, _entity: EntityId) -> anyhow::Result<Self::Item<'_>> {
                 Ok(($($p::fetch(_world, _entity)?,)*))
             }
         }

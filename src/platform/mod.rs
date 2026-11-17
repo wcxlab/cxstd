@@ -16,8 +16,6 @@ pub use events::*;
 pub use gamepad::GamepadSubsystem;
 pub use window::WindowSubsystem;
 
-use anyhow::Result;
-
 pub struct Platform {
     window: WindowSubsystem,
     gamepad: GamepadSubsystem,
@@ -25,7 +23,7 @@ pub struct Platform {
 }
 
 impl Platform {
-    pub fn new() -> Result<Self> {
+    pub fn new() -> anyhow::Result<Self> {
         let context = backend::sdl::init()?.context;
         let event = EventSubsystem::new(context.clone())?;
         Ok(Self {

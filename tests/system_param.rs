@@ -1,6 +1,4 @@
 mod support;
-
-use anyhow::Result;
 use cxstd::{
     Resource, Resources,
     ecs::{
@@ -27,11 +25,15 @@ struct Stats {
 }
 impl Resource for Stats {}
 
-fn integrate(
-    mut objects: Query<(EntityId, &mut Position, &Velocity)>,
-    step: Res<Step>,
-    mut stats: ResMut<Stats>,
+fn integrate<C: 'static>(
+    _: cxstd::ecs::SystemContext<'_, C>,
+    deps: (
+        Query<(EntityId, &mut Position, &Velocity)>,
+        Res<Step>,
+        ResMut<Stats>,
+    ),
 ) {
+    let (mut objects, step, mut stats) = deps;
     stats.frames += 1;
     for (entity, mut position, velocity) in objects.iter_mut() {
         position.0 += velocity.0 * step.0;
@@ -40,7 +42,7 @@ fn integrate(
 }
 
 #[test]
-fn functions_infer_parameters_and_queries_select_matching_entities() -> Result<()> {
+fn functions_infer_parameters_and_queries_select_matching_entities() -> anyhow::Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     let mut moving = Entity::new();
     moving.add_component(Position(1.0));
@@ -59,7 +61,10 @@ fn functions_infer_parameters_and_queries_select_matching_entities() -> Result<(
     }
     assert_eq!(ecs.world().component::<Position>(stationary)?.0, 100.0);
     assert_eq!(ecs.resource::<Stats>()?.entities, [moving, moving]);
-    let read = (move |all: Query<EntityId>, objects: Query<(EntityId, &Position)>| -> Result<()> {
+    let read = (move |_: cxstd::ecs::SystemContext<'_, _>,
+                      deps: (Query<EntityId>, Query<(EntityId, &Position)>)|
+          -> anyhow::Result<()> {
+        let (all, objects) = deps;
         assert_eq!(all.iter().count(), 3);
         assert_eq!(objects.iter().count(), 2);
         assert_eq!(objects.get(moving)?.1.0, 4.0);
@@ -72,7 +77,7 @@ fn functions_infer_parameters_and_queries_select_matching_entities() -> Result<(
 }
 
 #[test]
-fn disjoint_mutable_queries_and_resources_work_in_any_parameter_order() -> Result<()> {
+fn disjoint_mutable_queries_and_resources_work_in_any_parameter_order() -> anyhow::Result<()> {
     struct Shared(u32);
     impl Component for Shared {}
     impl Resource for Shared {}
@@ -86,12 +91,16 @@ fn disjoint_mutable_queries_and_resources_work_in_any_parameter_order() -> Resul
     ecs.add_resource(Stats::default())?;
     ecs.add_system(
         "update",
-        move |mut stats: ResMut<Stats>,
-              mut positions: Query<&mut Position>,
-              mut shared: ResMut<Shared>,
-              mut velocities: Query<&mut Velocity>,
-              components: Query<&Shared>|
-              -> Result<()> {
+        move |_: cxstd::ecs::SystemContext<'_, _>,
+              deps: (
+            ResMut<Stats>,
+            Query<&mut Position>,
+            ResMut<Shared>,
+            Query<&mut Velocity>,
+            Query<&Shared>,
+        )|
+              -> anyhow::Result<()> {
+            let (mut stats, mut positions, mut shared, mut velocities, components) = deps;
             stats.frames += 1;
             positions.get_mut(entity)?.0 += 2.0;
             velocities.get_mut(entity)?.0 += 3.0;
@@ -108,7 +117,7 @@ fn disjoint_mutable_queries_and_resources_work_in_any_parameter_order() -> Resul
 }
 
 #[test]
-fn duplicate_reads_are_allowed_for_queries_and_resources() -> Result<()> {
+fn duplicate_reads_are_allowed_for_queries_and_resources() -> anyhow::Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     let mut entity = Entity::new();
     entity.add_component(Position(5.0));
@@ -116,11 +125,15 @@ fn duplicate_reads_are_allowed_for_queries_and_resources() -> Result<()> {
     ecs.add_resource(Step(2.0))?;
     ecs.add_system(
         "update",
-        move |a: Res<Step>,
-              b: Res<Step>,
-              first: Query<&Position>,
-              second: Query<(&Position, &Position)>,
-              resources: &Resources| {
+        move |_: cxstd::ecs::SystemContext<'_, _>,
+              deps: (
+            Res<Step>,
+            Res<Step>,
+            Query<&Position>,
+            Query<(&Position, &Position)>,
+            &Resources,
+        )| {
+            let (a, b, first, second, resources) = deps;
             assert_eq!(a.0, b.0);
             assert_eq!(resources.get::<Step>().unwrap().0, 2.0);
             let (left, right) = second.get(entity).unwrap();
@@ -131,7 +144,7 @@ fn duplicate_reads_are_allowed_for_queries_and_resources() -> Result<()> {
     ecs.run()
 }
 
-fn rejects<M>(system: impl IntoSystem<(), M>) -> Result<()> {
+fn rejects<M>(system: impl IntoSystem<(), M>) -> anyhow::Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     ecs.add_system("update", system);
     let error = ecs.run().unwrap_err();
@@ -140,27 +153,85 @@ fn rejects<M>(system: impl IntoSystem<(), M>) -> Result<()> {
 }
 
 #[test]
-fn conflicting_parameters_fail_before_the_body_even_in_empty_world() -> Result<()> {
-    rejects(|_: Query<&mut Position>, _: Query<&Position>| -> () { panic!("query ran") })?;
-    rejects(|_: Query<&Position>, _: Query<&mut Position>| -> () { panic!("query ran") })?;
-    rejects(|_: Query<(&mut Position, &mut Position)>| -> () { panic!("query ran") })?;
-    rejects(|_: ResMut<Step>, _: Res<Step>| -> () { panic!("resource ran") })?;
-    rejects(|_: Res<Step>, _: ResMut<Step>| -> () { panic!("resource ran") })?;
-    rejects(|_: ResMut<Step>, _: ResMut<Step>| -> () { panic!("resource ran") })?;
-    rejects(|_: &World, _: Query<&mut Position>| -> () { panic!("owner ran") })?;
-    rejects(|_: Query<&mut Position>, _: &World| -> () { panic!("owner ran") })?;
-    rejects(|_: &Resources, _: ResMut<Step>| -> () { panic!("resource owner ran") })?;
-    rejects(|_: ResMut<Step>, _: &Resources| -> () { panic!("resource owner ran") })?;
+fn conflicting_parameters_fail_before_the_body_even_in_empty_world() -> anyhow::Result<()> {
+    rejects(
+        |_: cxstd::ecs::SystemContext<'_, _>,
+         deps: (Query<&mut Position>, Query<&Position>)|
+         -> () {
+            let (_, _) = deps;
+            panic!("query ran")
+        },
+    )?;
+    rejects(
+        |_: cxstd::ecs::SystemContext<'_, _>,
+         deps: (Query<&Position>, Query<&mut Position>)|
+         -> () {
+            let (_, _) = deps;
+            panic!("query ran")
+        },
+    )?;
+    rejects(
+        |_: cxstd::ecs::SystemContext<'_, _>, deps: Query<(&mut Position, &mut Position)>| -> () {
+            let _ = deps;
+            panic!("query ran")
+        },
+    )?;
+    rejects(
+        |_: cxstd::ecs::SystemContext<'_, _>, deps: (ResMut<Step>, Res<Step>)| -> () {
+            let (_, _) = deps;
+            panic!("resource ran")
+        },
+    )?;
+    rejects(
+        |_: cxstd::ecs::SystemContext<'_, _>, deps: (Res<Step>, ResMut<Step>)| -> () {
+            let (_, _) = deps;
+            panic!("resource ran")
+        },
+    )?;
+    rejects(
+        |_: cxstd::ecs::SystemContext<'_, _>, deps: (ResMut<Step>, ResMut<Step>)| -> () {
+            let (_, _) = deps;
+            panic!("resource ran")
+        },
+    )?;
+    rejects(
+        |_: cxstd::ecs::SystemContext<'_, _>, deps: (&World, Query<&mut Position>)| -> () {
+            let (_, _) = deps;
+            panic!("owner ran")
+        },
+    )?;
+    rejects(
+        |_: cxstd::ecs::SystemContext<'_, _>, deps: (Query<&mut Position>, &World)| -> () {
+            let (_, _) = deps;
+            panic!("owner ran")
+        },
+    )?;
+    rejects(
+        |_: cxstd::ecs::SystemContext<'_, _>, deps: (&Resources, ResMut<Step>)| -> () {
+            let (_, _) = deps;
+            panic!("resource owner ran")
+        },
+    )?;
+    rejects(
+        |_: cxstd::ecs::SystemContext<'_, _>, deps: (ResMut<Step>, &Resources)| -> () {
+            let (_, _) = deps;
+            panic!("resource owner ran")
+        },
+    )?;
     Ok(())
 }
 
 #[test]
-fn missing_resources_release_previously_fetched_guards() -> Result<()> {
+fn missing_resources_release_previously_fetched_guards() -> anyhow::Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     ecs.add_resource(Stats::default())?;
-    ecs.add_system("update", |mut stats: ResMut<Stats>, _: Res<Step>| {
-        stats.frames += 1;
-    });
+    ecs.add_system(
+        "update",
+        |_: cxstd::ecs::SystemContext<'_, _>, deps: (ResMut<Stats>, Res<Step>)| {
+            let (mut stats, _) = deps;
+            stats.frames += 1;
+        },
+    );
     assert!(format!("{:#}", ecs.run().unwrap_err()).contains("Step"));
     assert_eq!(ecs.resource::<Stats>()?.frames, 0);
     ecs.add_resource(Step(1.0))?;
@@ -170,7 +241,7 @@ fn missing_resources_release_previously_fetched_guards() -> Result<()> {
 }
 
 #[test]
-fn error_and_panic_release_borrows_and_stop_later_systems() -> Result<()> {
+fn error_and_panic_release_borrows_and_stop_later_systems() -> anyhow::Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     let mut entity = Entity::new();
     entity.add_component(Position(0.0));
@@ -178,13 +249,19 @@ fn error_and_panic_release_borrows_and_stop_later_systems() -> Result<()> {
     ecs.add_resource(Stats::default())?;
     ecs.add_system(
         "update",
-        |mut stats: ResMut<Stats>, mut objects: Query<&mut Position>| -> Result<()> {
+        |_: cxstd::ecs::SystemContext<'_, _>,
+         deps: (ResMut<Stats>, Query<&mut Position>)|
+         -> anyhow::Result<()> {
+            let (mut stats, mut objects) = deps;
             stats.frames += 1;
             objects.iter_mut().next().unwrap().0 += 1.0;
             anyhow::bail!("system failure")
         },
     )
-    .add_system("update", || -> () { panic!("later system ran") });
+    .add_system(
+        "update",
+        |_: cxstd::ecs::SystemContext<'_, _>, _deps: ()| -> () { panic!("later system ran") },
+    );
     assert!(format!("{:#}", ecs.run().unwrap_err()).contains("system failure"));
     assert_eq!(ecs.resource::<Stats>()?.frames, 1);
     assert_eq!(ecs.world().component::<Position>(entity)?.0, 1.0);
@@ -196,7 +273,8 @@ fn error_and_panic_release_borrows_and_stop_later_systems() -> Result<()> {
     panic_ecs.add_resource(Stats::default())?;
     panic_ecs.add_system(
         "update",
-        |mut stats: ResMut<Stats>, mut objects: Query<&mut Position>| -> () {
+        |_: cxstd::ecs::SystemContext<'_, _>, deps: (ResMut<Stats>, Query<&mut Position>)| -> () {
+            let (mut stats, mut objects) = deps;
             stats.frames += 1;
             let mut position = objects.iter_mut().next().unwrap();
             position.0 += 1.0;
@@ -215,7 +293,7 @@ fn error_and_panic_release_borrows_and_stop_later_systems() -> Result<()> {
 }
 
 #[test]
-fn command_event_and_task_parameters_use_the_executing_ecs() -> Result<()> {
+fn command_event_and_task_parameters_use_the_executing_ecs() -> anyhow::Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     let target = ecs.world_mut().add_entity(Entity::with_state(0_u32));
     let target = ecs.world_mut().typed::<u32>(target)?;
@@ -228,11 +306,15 @@ fn command_event_and_task_parameters_use_the_executing_ecs() -> Result<()> {
     let completion = completed.clone();
     ecs.add_system(
         "update",
-        move |commands: CommandQueue,
-              events: &EventDispatcher<EntityId, World>,
-              tasks: &TaskExecutor,
-              mut stats: ResMut<Stats>|
-              -> Result<()> {
+        move |_: cxstd::ecs::SystemContext<'_, _>,
+              deps: (
+            CommandQueue,
+            &EventDispatcher<EntityId, World>,
+            &TaskExecutor,
+            ResMut<Stats>,
+        )|
+              -> anyhow::Result<()> {
+            let (commands, events, tasks, mut stats) = deps;
             events.emit(target.entity(), 7_u32);
             stats.frames += 1;
             commands.queue_with(|world, _, access| {
@@ -262,23 +344,28 @@ fn command_event_and_task_parameters_use_the_executing_ecs() -> Result<()> {
 }
 
 #[test]
-fn closures_exclusive_functions_and_custom_systems_coexist() -> Result<()> {
+fn closures_exclusive_functions_and_custom_systems_coexist() -> anyhow::Result<()> {
     #[derive(Default)]
     struct Host {
         calls: usize,
     }
     impl SystemParam<Host> for &Host {
         type Item<'w> = &'w Host;
-        fn access(_: &mut SystemAccess) -> Result<()> {
+        fn access(_: &mut SystemAccess) -> anyhow::Result<()> {
             Ok(())
         }
-        fn fetch(input: SystemInput<'_, Host>) -> Result<Self::Item<'_>> {
+        fn fetch(input: SystemInput<'_, Host>) -> anyhow::Result<Self::Item<'_>> {
             Ok(input.context)
         }
     }
     struct Custom;
     impl System<Host> for Custom {
-        fn run(&mut self, _: &mut World, _: &mut Host, access: EcsContext<'_, Host>) -> Result<()> {
+        fn run(
+            &mut self,
+            _: &mut World,
+            _: &mut Host,
+            access: EcsContext<'_, Host>,
+        ) -> anyhow::Result<()> {
             access.resources().get_mut::<Stats>()?.frames += 100;
             Ok(())
         }
@@ -289,24 +376,31 @@ fn closures_exclusive_functions_and_custom_systems_coexist() -> Result<()> {
     let observed = Rc::new(Cell::new(0));
     let calls = observed.clone();
     let mut local_calls = 0;
-    ecs.add_system("update", || {})
-        .add_system("update", move |world: &World, _: Res<Stats>, _: &Host| {
+    ecs.add_system(
+        "update",
+        |_: cxstd::ecs::SystemContext<'_, _>, _deps: ()| {},
+    )
+    .add_system(
+        "update",
+        move |_: cxstd::ecs::SystemContext<'_, _>, deps: (&World, Res<Stats>, &Host)| {
+            let (world, _, _) = deps;
             local_calls += 1;
             calls.set(local_calls);
             assert_eq!(world.entities().count(), local_calls - 1);
-        })
-        .add_system("update", |world: &mut World| {
-            world.add_entity(Entity::new());
-        })
-        .add_system("update", |host: &mut Host| {
-            host.calls += 1;
-        })
-        .add_system("update", Custom)
-        .add_system("update", |host: &mut Host, world: &mut World| {
-            host.calls += world.entities().count();
-        });
-    ecs.run_schedule_with("update", &mut host)?;
-    ecs.run_schedule_with("update", &mut host)?;
+        },
+    )
+    .add_system("update", |world: &mut World| {
+        world.add_entity(Entity::new());
+    })
+    .add_system("update", |host: &mut Host| {
+        host.calls += 1;
+    })
+    .add_system("update", Custom)
+    .add_system("update", |host: &mut Host, world: &mut World| {
+        host.calls += world.entities().count();
+    });
+    ecs.run_stage_with("update", &mut host)?;
+    ecs.run_stage_with("update", &mut host)?;
     assert_eq!(observed.get(), 2);
     assert_eq!(host.calls, 5);
     assert_eq!(ecs.resource::<Stats>()?.frames, 200);
@@ -314,17 +408,17 @@ fn closures_exclusive_functions_and_custom_systems_coexist() -> Result<()> {
 }
 
 #[test]
-fn custom_parameters_compose_existing_fetches_and_access_declarations() -> Result<()> {
+fn custom_parameters_compose_existing_fetches_and_access_declarations() -> anyhow::Result<()> {
     struct Frame<'w> {
         step: Res<'w, Step>,
         stats: ResMut<'w, Stats>,
     }
     impl SystemParam for Frame<'_> {
         type Item<'w> = Frame<'w>;
-        fn access(access: &mut SystemAccess) -> Result<()> {
+        fn access(access: &mut SystemAccess) -> anyhow::Result<()> {
             <(Res<'static, Step>, ResMut<'static, Stats>) as SystemParam<()>>::access(access)
         }
-        fn fetch(input: SystemInput<'_, ()>) -> Result<Self::Item<'_>> {
+        fn fetch(input: SystemInput<'_, ()>) -> anyhow::Result<Self::Item<'_>> {
             let (step, stats) = <(Res<'static, Step>, ResMut<'static, Stats>)>::fetch(input)?;
             Ok(Frame { step, stats })
         }
@@ -332,16 +426,22 @@ fn custom_parameters_compose_existing_fetches_and_access_declarations() -> Resul
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     ecs.add_resource(Step(2.0))?;
     ecs.add_resource(Stats::default())?;
-    ecs.add_system("update", |mut frame: Frame| {
+    ecs.add_system("update", |_: cxstd::ecs::SystemContext, deps: Frame| {
+        let mut frame = deps;
         frame.stats.frames += frame.step.0 as usize;
     });
     ecs.run()?;
     assert_eq!(ecs.resource::<Stats>()?.frames, 2);
-    rejects(|_: Frame, _: Res<Stats>| -> () { panic!("custom conflict") })
+    rejects(
+        |_: cxstd::ecs::SystemContext<'_, _>, deps: (Frame, Res<Stats>)| -> () {
+            let (_, _) = deps;
+            panic!("custom conflict")
+        },
+    )
 }
 
 #[test]
-fn host_resources_do_not_override_ecs_resources() -> Result<()> {
+fn host_resources_do_not_override_ecs_resources() -> anyhow::Result<()> {
     struct Simulation {
         resources: Resources,
         name: &'static str,

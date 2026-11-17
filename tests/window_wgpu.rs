@@ -1,13 +1,11 @@
+use cxstd::platform::{self, PlatformEvent, PlatformEventMessage};
+use cxstd::window::{WgpuWindow, Window, WindowError, WindowHandler};
 use std::{
     cell::Cell,
     rc::Rc,
     thread,
     time::{Duration, Instant},
 };
-
-use anyhow::Result;
-use cxstd::platform::{self, PlatformEvent, PlatformEventMessage};
-use cxstd::window::{WgpuWindow, Window, WindowError, WindowHandler};
 
 static WINDOW_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -120,7 +118,7 @@ impl WindowHandler<WgpuWindow> for SecondWindow {
 }
 
 #[test]
-fn creates_two_windows_with_independent_handlers() -> Result<(), WindowError> {
+fn creates_two_windows_with_independent_handlers() -> anyhow::Result<()> {
     let _guard = WINDOW_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());

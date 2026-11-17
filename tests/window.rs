@@ -1,3 +1,5 @@
+use cxstd::platform::{self, PlatformEvent, PlatformEventFlags, PlatformEventMessage};
+use cxstd::window::{WgpuWindow, Window, WindowCursor, WindowError, WindowHandler, WindowId};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -5,13 +7,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
-use cxstd::platform::{self, PlatformEvent, PlatformEventFlags, PlatformEventMessage};
-use cxstd::window::{WgpuWindow, Window, WindowCursor, WindowError, WindowHandler, WindowId};
-
 static WINDOW_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn render_frame(window: &mut WgpuWindow) -> Result<(), WindowError> {
+fn render_frame(window: &mut WgpuWindow) -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         while platform::poll_event().is_some() {}
@@ -60,7 +58,7 @@ impl WindowHandler<WgpuWindow> for Handler {
 }
 
 #[test]
-fn initializes_on_build() -> Result<(), WindowError> {
+fn initializes_on_build() -> anyhow::Result<()> {
     let _guard = WINDOW_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -69,8 +67,8 @@ fn initializes_on_build() -> Result<(), WindowError> {
 }
 
 #[test]
-fn window_retains_handler_after_panics_and_drops_it_before_native_resources()
--> Result<(), WindowError> {
+fn window_retains_handler_after_panics_and_drops_it_before_native_resources() -> anyhow::Result<()>
+{
     let _guard = WINDOW_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -126,7 +124,7 @@ fn window_retains_handler_after_panics_and_drops_it_before_native_resources()
 }
 
 #[test]
-fn builder_owns_configuration_and_initializes_only_when_built() -> Result<(), WindowError> {
+fn builder_owns_configuration_and_initializes_only_when_built() -> anyhow::Result<()> {
     let _guard = WINDOW_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -156,8 +154,7 @@ fn builder_owns_configuration_and_initializes_only_when_built() -> Result<(), Wi
 }
 
 #[test]
-fn windows_share_the_video_owner_and_reject_creation_on_another_thread() -> Result<(), WindowError>
-{
+fn windows_share_the_video_owner_and_reject_creation_on_another_thread() -> anyhow::Result<()> {
     let _guard = WINDOW_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -177,7 +174,7 @@ fn windows_share_the_video_owner_and_reject_creation_on_another_thread() -> Resu
 }
 
 #[test]
-fn creates_window() -> Result<(), WindowError> {
+fn creates_window() -> anyhow::Result<()> {
     let _guard = WINDOW_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -205,7 +202,7 @@ fn creates_window() -> Result<(), WindowError> {
 }
 
 #[test]
-fn rejects_nul_title() -> Result<(), WindowError> {
+fn rejects_nul_title() -> anyhow::Result<()> {
     let _guard = WINDOW_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -216,12 +213,15 @@ fn rejects_nul_title() -> Result<(), WindowError> {
         .hidden(true)
         .handler(Handler::default())
         .build();
-    assert!(matches!(invalid_title, Err(WindowError::Nul(message)) if !message.is_empty()));
+    let error = invalid_title.err().expect("NUL title must fail");
+    assert!(
+        matches!(error.downcast_ref::<WindowError>(), Some(WindowError::Nul(message)) if !message.is_empty())
+    );
     Ok(())
 }
 
 #[test]
-fn sets_system_cursors_and_controls_text_input() -> Result<(), WindowError> {
+fn sets_system_cursors_and_controls_text_input() -> anyhow::Result<()> {
     let _guard = WINDOW_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -244,7 +244,7 @@ fn sets_system_cursors_and_controls_text_input() -> Result<(), WindowError> {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn handle_provider_keeps_the_native_window_and_context_alive() -> Result<(), WindowError> {
+fn handle_provider_keeps_the_native_window_and_context_alive() -> anyhow::Result<()> {
     let _guard = WINDOW_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -271,7 +271,7 @@ fn handle_provider_keeps_the_native_window_and_context_alive() -> Result<(), Win
 
 #[cfg(target_os = "windows")]
 #[test]
-fn exposes_native_handles() -> Result<(), WindowError> {
+fn exposes_native_handles() -> anyhow::Result<()> {
     let _guard = WINDOW_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -290,7 +290,7 @@ fn exposes_native_handles() -> Result<(), WindowError> {
 }
 
 #[test]
-fn processes_window_events() -> Result<(), WindowError> {
+fn processes_window_events() -> anyhow::Result<()> {
     let _guard = WINDOW_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -372,7 +372,7 @@ fn processes_window_events() -> Result<(), WindowError> {
 }
 
 #[test]
-fn reinitializes_after_window_drop() -> Result<(), WindowError> {
+fn reinitializes_after_window_drop() -> anyhow::Result<()> {
     let _guard = WINDOW_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -397,7 +397,7 @@ fn reinitializes_after_window_drop() -> Result<(), WindowError> {
 }
 
 #[test]
-fn owns_and_dispatches_window_handler() -> Result<(), WindowError> {
+fn owns_and_dispatches_window_handler() -> anyhow::Result<()> {
     let _guard = WINDOW_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -428,7 +428,7 @@ fn owns_and_dispatches_window_handler() -> Result<(), WindowError> {
 }
 
 #[test]
-fn releases_handler_when_initialization_fails() -> Result<(), WindowError> {
+fn releases_handler_when_initialization_fails() -> anyhow::Result<()> {
     let _guard = WINDOW_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -468,7 +468,7 @@ fn releases_handler_when_initialization_fails() -> Result<(), WindowError> {
         })
         .build();
     assert!(
-        matches!(result, Err(WindowError::Callback(error)) if error.to_string() == "initialization failed")
+        matches!(result.err().expect("callback must fail").downcast_ref::<WindowError>(), Some(WindowError::Callback(error)) if error.to_string() == "initialization failed")
     );
     assert_eq!(errors.get(), 1);
     assert!(dropped.get());
@@ -489,7 +489,7 @@ fn queued_requests() -> Vec<(WindowId, PlatformEvent)> {
 }
 
 #[test]
-fn queues_targeted_requests_without_echoing_dispatched_events() -> Result<(), WindowError> {
+fn queues_targeted_requests_without_echoing_dispatched_events() -> anyhow::Result<()> {
     let _guard = WINDOW_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -545,8 +545,8 @@ fn queues_targeted_requests_without_echoing_dispatched_events() -> Result<(), Wi
 }
 
 #[test]
-fn callback_requests_are_queued_for_later_polls_and_skipped_frames_can_retry()
--> Result<(), WindowError> {
+fn callback_requests_are_queued_for_later_polls_and_skipped_frames_can_retry() -> anyhow::Result<()>
+{
     let _guard = WINDOW_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -604,7 +604,7 @@ fn callback_requests_are_queued_for_later_polls_and_skipped_frames_can_retry()
 }
 
 #[test]
-fn normalizes_composition_lifecycle_per_window() -> Result<(), WindowError> {
+fn normalizes_composition_lifecycle_per_window() -> anyhow::Result<()> {
     use sdl3_sys::{events, video::SDL_WindowID};
     use std::ffi::CStr;
 
@@ -717,7 +717,7 @@ fn normalizes_composition_lifecycle_per_window() -> Result<(), WindowError> {
 }
 
 #[test]
-fn normalizes_web_event_payloads() -> Result<(), WindowError> {
+fn normalizes_web_event_payloads() -> anyhow::Result<()> {
     use sdl3_sys::{events, keycode, scancode, video::SDL_WindowID};
 
     let _guard = WINDOW_TESTS

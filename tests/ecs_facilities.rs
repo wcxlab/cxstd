@@ -1,6 +1,4 @@
 mod support;
-
-use anyhow::Result;
 use cxstd::{
     Resource,
     ecs::{CommandQueue, Entity},
@@ -13,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn wait_until(mut ready: impl FnMut() -> Result<bool>) -> Result<()> {
+fn wait_until(mut ready: impl FnMut() -> anyhow::Result<bool>) -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(3);
     while !ready()? {
         anyhow::ensure!(Instant::now() < deadline, "ECS operation timed out");
@@ -27,29 +25,33 @@ struct Trace(Vec<&'static str>);
 impl Resource for Trace {}
 
 #[test]
-fn commands_wait_for_barriers_and_keep_new_work_for_the_next_batch() -> Result<()> {
+fn commands_wait_for_barriers_and_keep_new_work_for_the_next_batch() -> anyhow::Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     let value = ecs.world_mut().add_entity(Entity::with_state(0_u32));
     let value = ecs.world_mut().typed::<u32>(value)?;
     ecs.add_resource(Trace::default())?;
     let observed = Rc::new(Cell::new(0));
     let calls = observed.clone();
-    ecs.add_system("update", move |commands: CommandQueue| {
-        calls.set(calls.get() + 1);
-        commands.queue_with(move |world, _, access| {
-            *world.state_mut(value)? += 1;
-            access.resources().get_mut::<Trace>()?.0.push("command");
-            access.command_queue().queue_with(|_, _, access| {
-                access
-                    .resources()
-                    .get_mut::<Trace>()?
-                    .0
-                    .push("next barrier");
+    ecs.add_system(
+        "update",
+        move |_: cxstd::ecs::SystemContext<'_, _>, deps: CommandQueue| {
+            let commands = deps;
+            calls.set(calls.get() + 1);
+            commands.queue_with(move |world, _, access| {
+                *world.state_mut(value)? += 1;
+                access.resources().get_mut::<Trace>()?.0.push("command");
+                access.command_queue().queue_with(|_, _, access| {
+                    access
+                        .resources()
+                        .get_mut::<Trace>()?
+                        .0
+                        .push("next barrier");
+                    Ok(())
+                });
                 Ok(())
             });
-            Ok(())
-        });
-    });
+        },
+    );
     ecs.run()?;
     assert!(ecs.resource::<Trace>()?.0.is_empty());
     assert_eq!(*value.read(ecs.world())?, 0);
@@ -67,7 +69,7 @@ fn commands_wait_for_barriers_and_keep_new_work_for_the_next_batch() -> Result<(
 }
 
 #[test]
-fn failed_commands_preserve_old_work_before_new_and_stop_systems() -> Result<()> {
+fn failed_commands_preserve_old_work_before_new_and_stop_systems() -> anyhow::Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     ecs.add_resource(Trace::default())?;
     ecs.command_queue().queue_with(|_, _, access| {
@@ -81,8 +83,10 @@ fn failed_commands_preserve_old_work_before_new_and_stop_systems() -> Result<()>
         access.resources().get_mut::<Trace>()?.0.push("retained");
         Ok(())
     });
-    ecs.add_apply_deferred("update")
-        .add_system("update", || -> () { panic!("later system ran") });
+    ecs.add_apply_deferred("update").add_system(
+        "update",
+        |_: cxstd::ecs::SystemContext<'_, _>, _deps: ()| -> () { panic!("later system ran") },
+    );
     assert!(ecs.run().is_err());
     assert_eq!(ecs.apply_commands(&mut ())?, 2);
     assert_eq!(ecs.resource::<Trace>()?.0, ["retained", "new"]);
@@ -90,7 +94,7 @@ fn failed_commands_preserve_old_work_before_new_and_stop_systems() -> Result<()>
 }
 
 #[test]
-fn scoped_resources_restore_after_errors_and_panics_with_world_access() -> Result<()> {
+fn scoped_resources_restore_after_errors_and_panics_with_world_access() -> anyhow::Result<()> {
     struct Local(Rc<Cell<usize>>);
     impl Resource for Local {}
     let (_runtime, mut ecs) = support::ecs::<()>()?;
@@ -124,7 +128,7 @@ fn scoped_resources_restore_after_errors_and_panics_with_world_access() -> Resul
 }
 
 #[test]
-fn dropping_an_ecs_releases_its_resources_and_state() -> Result<()> {
+fn dropping_an_ecs_releases_its_resources_and_state() -> anyhow::Result<()> {
     struct Local(Rc<()>);
     impl Resource for Local {}
     let (_runtime, mut ecs) = support::ecs::<()>()?;
@@ -146,7 +150,7 @@ fn dropping_an_ecs_releases_its_resources_and_state() -> Result<()> {
 }
 
 #[test]
-fn targeted_events_are_typed_batched_cancelled_and_pruned_after_despawn() -> Result<()> {
+fn targeted_events_are_typed_batched_cancelled_and_pruned_after_despawn() -> anyhow::Result<()> {
     struct Edited(u32);
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     let panel = ecs.world_mut().add_entity(Entity::with_state(0_u32));
@@ -189,7 +193,7 @@ fn targeted_events_are_typed_batched_cancelled_and_pruned_after_despawn() -> Res
 }
 
 #[test]
-fn deleting_a_target_skips_later_callbacks_and_releases_captures() -> Result<()> {
+fn deleting_a_target_skips_later_callbacks_and_releases_captures() -> anyhow::Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     let target = ecs.world_mut().add_entity(Entity::new());
     let lifetime = Rc::new(());
@@ -212,7 +216,8 @@ fn deleting_a_target_skips_later_callbacks_and_releases_captures() -> Result<()>
 }
 
 #[test]
-fn async_completion_uses_owner_facilities_and_observers_wait_for_the_next_batch() -> Result<()> {
+fn async_completion_uses_owner_facilities_and_observers_wait_for_the_next_batch()
+-> anyhow::Result<()> {
     struct Edited(u32);
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     let value = ecs.world_mut().add_entity(Entity::with_state(0_u32));
@@ -252,7 +257,7 @@ fn async_completion_uses_owner_facilities_and_observers_wait_for_the_next_batch(
 }
 
 #[test]
-fn observer_and_completion_errors_return_at_command_barriers() -> Result<()> {
+fn observer_and_completion_errors_return_at_command_barriers() -> anyhow::Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     let target = ecs.world_mut().add_entity(Entity::new());
     let changed = ecs.observe(target, |_, _| anyhow::bail!("observer failure"));
@@ -274,7 +279,7 @@ fn observer_and_completion_errors_return_at_command_barriers() -> Result<()> {
 }
 
 #[test]
-fn dropping_an_ecs_cancels_tasks_and_breaks_owned_observer_cycles() -> Result<()> {
+fn dropping_an_ecs_cancels_tasks_and_breaks_owned_observer_cycles() -> anyhow::Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     let target = ecs.world_mut().add_entity(Entity::new());
     let lifetime = Rc::new(());
@@ -305,7 +310,7 @@ fn dropping_an_ecs_cancels_tasks_and_breaks_owned_observer_cycles() -> Result<()
 }
 
 #[test]
-fn ecs_instances_isolate_resources_tasks_events_and_observers() -> Result<()> {
+fn ecs_instances_isolate_resources_tasks_events_and_observers() -> anyhow::Result<()> {
     let (_runtime1, mut first) = support::ecs::<()>()?;
     let (_runtime2, mut second) = support::ecs::<()>()?;
     first.add_resource(Trace(vec!["first"]))?;

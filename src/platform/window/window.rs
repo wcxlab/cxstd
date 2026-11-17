@@ -1,7 +1,7 @@
 //! Shared window operations and host lifecycle callbacks.
 //! State queries report cached native flags; hidden windows may report pending changes.
 
-use super::{WindowCursor, WindowError, WindowHandle, WindowId};
+use super::{WindowCursor, WindowHandle, WindowId};
 use crate::platform::PlatformEventMessage;
 
 /// Native window operations shared by hosts.
@@ -47,45 +47,45 @@ pub trait Window {
     fn is_focused(&self) -> bool;
 
     /// Queue a Redraw event for the next event poll.
-    fn request_redraw(&mut self) -> Result<(), WindowError>;
+    fn request_redraw(&mut self) -> anyhow::Result<()>;
 
     /// Queue a Close event; the host decides when to close.
-    fn request_close(&mut self) -> Result<(), WindowError>;
+    fn request_close(&mut self) -> anyhow::Result<()>;
 
     /// Request a client size in logical pixels.
-    fn resize_to(&mut self, width: i32, height: i32) -> Result<(), WindowError>;
+    fn resize_to(&mut self, width: i32, height: i32) -> anyhow::Result<()>;
 
     /// Request a client size change in logical pixels.
-    fn resize_by(&mut self, width: i32, height: i32) -> Result<(), WindowError>;
+    fn resize_by(&mut self, width: i32, height: i32) -> anyhow::Result<()>;
 
     /// Request a position in platform desktop coordinates, matching the builder.
-    fn move_to(&mut self, x: i32, y: i32) -> Result<(), WindowError>;
+    fn move_to(&mut self, x: i32, y: i32) -> anyhow::Result<()>;
 
     /// Request a position change in platform desktop coordinates.
-    fn move_by(&mut self, x: i32, y: i32) -> Result<(), WindowError>;
+    fn move_by(&mut self, x: i32, y: i32) -> anyhow::Result<()>;
 
     /// Request input focus and bring the window forward.
-    fn focus(&mut self) -> Result<(), WindowError>;
+    fn focus(&mut self) -> anyhow::Result<()>;
 
-    fn maximize(&mut self) -> Result<(), WindowError>;
+    fn maximize(&mut self) -> anyhow::Result<()>;
 
-    fn minimize(&mut self) -> Result<(), WindowError>;
+    fn minimize(&mut self) -> anyhow::Result<()>;
 
-    fn restore(&mut self) -> Result<(), WindowError>;
+    fn restore(&mut self) -> anyhow::Result<()>;
 
     /// Request entering or leaving fullscreen.
-    fn fullscreen(&mut self, fullscreen: bool) -> Result<(), WindowError>;
+    fn fullscreen(&mut self, fullscreen: bool) -> anyhow::Result<()>;
 
     /// Enable or disable a borderless window.
-    fn borderless(&mut self, borderless: bool) -> Result<(), WindowError>;
+    fn borderless(&mut self, borderless: bool) -> anyhow::Result<()>;
 
-    fn set_cursor(&mut self, cursor: WindowCursor) -> Result<(), WindowError>;
+    fn set_cursor(&mut self, cursor: WindowCursor) -> anyhow::Result<()>;
 
-    fn start_text_input(&mut self) -> Result<(), WindowError>;
+    fn start_text_input(&mut self) -> anyhow::Result<()>;
 
-    fn stop_text_input(&mut self) -> Result<(), WindowError>;
+    fn stop_text_input(&mut self) -> anyhow::Result<()>;
 
-    fn raw_window_handle(&self) -> Result<WindowHandle<'_>, WindowError>;
+    fn raw_window_handle(&self) -> anyhow::Result<WindowHandle<'_>>;
 }
 
 /// Host callbacks for window initialization, events, updates, and rendering.

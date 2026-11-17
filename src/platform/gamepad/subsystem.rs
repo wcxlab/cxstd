@@ -4,7 +4,6 @@ use std::rc::Rc;
 
 use crate::gamepad::Gamepad;
 use crate::platform::backend::sdl::{self, SdlContext};
-use anyhow::Result;
 
 pub struct GamepadSubsystem {
     pub(in crate::platform) context: Rc<SdlContext>,
@@ -12,7 +11,7 @@ pub struct GamepadSubsystem {
 
 impl GamepadSubsystem {
     /// Enable device monitoring and enumerate standard slots, including vacant slots.
-    pub fn get_gamepads(&self) -> Result<Vec<Option<Gamepad>>> {
+    pub fn get_gamepads(&self) -> anyhow::Result<Vec<Option<Gamepad>>> {
         sdl::gamepads_for_context(&self.context)
     }
 

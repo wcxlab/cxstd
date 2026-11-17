@@ -1,9 +1,7 @@
-//! Create a `View2dPlugin::default()` instance and call `plugin.load(ecs)` to register
+//! Call `ecs.add_plugin(View2dPlugin::default())` to register
 //! page entities and tree and paint systems.
 //! The host supplies a Core Status snapshot before running the update schedule.
-
-use anyhow::Result;
-use cxstd::ecs::{Component, Ecs, Entity, Plugin, Query, Res, ResMut};
+use cxstd::ecs::{Component, Entity, Plugin, PluginContext, Query, Res, ResMut};
 
 use super::render::PaintList;
 use crate::app_core::Status;
@@ -12,17 +10,19 @@ use crate::app_core::Status;
 pub(super) struct View2dPlugin;
 
 impl Plugin for View2dPlugin {
-    fn load(&mut self, ecs: &mut Ecs) -> Result<()> {
+    type LoadParams = ();
+
+    fn load(&mut self, ctx: PluginContext, _deps: ()) -> anyhow::Result<()> {
         let mut view_entity1 = Entity::new();
         view_entity1.add_component(ElementTree::new("page 1"));
-        ecs.world_mut().add_entity(view_entity1);
+        ctx.add_entity(view_entity1);
 
         let mut view_entity2 = Entity::new();
         view_entity2.add_component(ElementTree::new("page 2"));
-        ecs.world_mut().add_entity(view_entity2);
+        ctx.add_entity(view_entity2);
 
-        ecs.add_system("update", build_view2d_system);
-        ecs.add_system("render", paint_view2d_system);
+        ctx.add_system("update", build_view2d_system);
+        ctx.add_system("render", paint_view2d_system);
         Ok(())
     }
 }
@@ -58,7 +58,11 @@ impl ElementTree {
     }
 }
 
-pub(super) fn build_view2d_system(mut trees: Query<&mut ElementTree>, status: Res<Status>) {
+pub(super) fn build_view2d_system(
+    _: cxstd::ecs::SystemContext,
+    deps: (Query<&mut ElementTree>, Res<Status>),
+) {
+    let (mut trees, status) = deps;
     let counter = status.counter();
     for mut tree in trees.iter_mut() {
         tree.builds += 1;
@@ -70,9 +74,13 @@ pub(super) fn build_view2d_system(mut trees: Query<&mut ElementTree>, status: Re
     }
 }
 
-pub(super) fn paint_view2d_system(trees: Query<&ElementTree>, mut list: ResMut<PaintList>) {
-    list.0.clear();
+pub(super) fn paint_view2d_system(
+    _: cxstd::ecs::SystemContext,
+    deps: (Query<&ElementTree>, ResMut<PaintList>),
+) {
+    let (trees, mut list) = deps;
     for tree in trees.iter() {
+        list.0.clear();
         if let Some(root) = &tree.root {
             root.paint(&mut list.0, 0);
         }
@@ -101,10 +109,10 @@ mod tests {
     use super::*;
     use crate::app_core::AppCore;
     use crate::app_view::AppView;
-    use anyhow::Result;
 
     #[tokio::test]
-    async fn render_reads_the_latest_tree_without_accumulating_paint_commands() -> Result<()> {
+    async fn render_reads_the_latest_tree_without_accumulating_paint_commands() -> anyhow::Result<()>
+    {
         let mut core = AppCore::new()?;
         let mut view = AppView::new()?;
         let pages: Vec<_> = view
@@ -129,7 +137,7 @@ mod tests {
                 status.counter(),
             );
             let previous = view.ecs.resource::<PaintList>()?.0.clone();
-            view.ecs.run_schedule("update")?;
+            view.ecs.run_stage("update")?;
             for &viewentity in &pages {
                 assert_eq!(
                     view.ecs
@@ -142,7 +150,7 @@ mod tests {
             assert_eq!(view.ecs.world().query::<ElementTree>().count(), 2);
             assert_eq!(view.ecs.resource::<PaintList>()?.0, previous);
 
-            view.ecs.run_schedule("render")?;
+            view.ecs.run_stage("render")?;
             assert_eq!(
                 view.ecs.resource::<PaintList>()?.0,
                 vec![

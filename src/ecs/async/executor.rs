@@ -160,7 +160,7 @@ impl TaskExecutor {
         &self,
         future: F,
         callback: impl FnOnce(O) + 'static,
-    ) -> Result<Task<O>, AsyncClosed>
+    ) -> anyhow::Result<Task<O>>
     where
         F: Future<Output = O> + Send + 'static,
         O: Send + 'static,
@@ -208,14 +208,14 @@ impl TaskExecutor {
     }
 
     /// Spawn an awaitable task on the captured host Tokio runtime.
-    pub fn spawn_awaitable<F, O>(&self, future: F) -> Result<Task<O>, AsyncClosed>
+    pub fn spawn_awaitable<F, O>(&self, future: F) -> anyhow::Result<Task<O>>
     where
         F: Future<Output = O> + Send + 'static,
         O: Send + 'static,
     {
         self.assert_main_thread();
         if self.shared.closed.load(Ordering::Acquire) {
-            return Err(AsyncClosed);
+            return Err(AsyncClosed.into());
         }
 
         let task_id = TaskId::next_untracked();
@@ -224,7 +224,7 @@ impl TaskExecutor {
     }
 
     /// Run a non-Send future on the executor's owning thread.
-    pub fn spawn_local<F, O>(&self, future: F) -> Result<Task<O>, AsyncClosed>
+    pub fn spawn_local<F, O>(&self, future: F) -> anyhow::Result<Task<O>>
     where
         F: Future<Output = O> + 'static,
         O: 'static,
@@ -237,7 +237,7 @@ impl TaskExecutor {
         &self,
         future: F,
         scope: Option<TaskScope>,
-    ) -> Result<Task<O>, AsyncClosed>
+    ) -> anyhow::Result<Task<O>>
     where
         F: Future<Output = O> + 'static,
         O: 'static,
@@ -246,7 +246,7 @@ impl TaskExecutor {
         if self.shared.closed.load(Ordering::Acquire)
             || scope.as_ref().is_some_and(TaskScope::is_closed)
         {
-            return Err(AsyncClosed);
+            return Err(AsyncClosed.into());
         }
 
         let task_id = TaskId::next_untracked();
@@ -421,17 +421,17 @@ impl TaskExecutor {
         future: F,
         callback: CompletionCallback,
         scope: Option<TaskScope>,
-    ) -> Result<Task<O>, AsyncClosed>
+    ) -> anyhow::Result<Task<O>>
     where
         F: Future<Output = O> + Send + 'static,
         O: Send + 'static,
     {
         self.assert_main_thread();
         if self.shared.closed.load(Ordering::Acquire) {
-            return Err(AsyncClosed);
+            return Err(AsyncClosed.into());
         }
         if scope.as_ref().is_some_and(TaskScope::is_closed) {
-            return Err(AsyncClosed);
+            return Err(AsyncClosed.into());
         }
 
         let task_id = TaskId::next_untracked();
@@ -519,9 +519,9 @@ impl TaskExecutor {
 }
 
 impl<T: Send + 'static> AsyncCallback<T> {
-    pub fn send(&self, value: T) -> Result<(), AsyncClosed> {
+    pub fn send(&self, value: T) -> anyhow::Result<()> {
         if self.shared.closed.load(Ordering::Acquire) {
-            return Err(AsyncClosed);
+            return Err(AsyncClosed.into());
         }
         self.shared
             .callback_tx

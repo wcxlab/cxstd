@@ -1,10 +1,8 @@
+use cxstd::ecs::{Component, Entity, World};
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     rc::Rc,
 };
-
-use anyhow::Result;
-use cxstd::ecs::{Component, Entity, World};
 
 struct Position(f32);
 impl Component for Position {}
@@ -12,7 +10,8 @@ struct Velocity(f32);
 impl Component for Velocity {}
 
 #[test]
-fn ordinary_state_can_create_children_and_survives_scoped_errors_and_unwinding() -> Result<()> {
+fn ordinary_state_can_create_children_and_survives_scoped_errors_and_unwinding()
+-> anyhow::Result<()> {
     struct Panel {
         count: u32,
     }
@@ -31,7 +30,7 @@ fn ordinary_state_can_create_children_and_survives_scoped_errors_and_unwinding()
     assert_eq!(panel.read(&world)?.count, 1);
     assert!(
         panel
-            .update(&mut world, |state, _| -> Result<()> {
+            .update(&mut world, |state, _| -> anyhow::Result<()> {
                 state.count += 1;
                 anyhow::bail!("expected failure")
             })
@@ -40,7 +39,7 @@ fn ordinary_state_can_create_children_and_survives_scoped_errors_and_unwinding()
     assert_eq!(panel.read(&world)?.count, 2);
     assert!(
         catch_unwind(AssertUnwindSafe(|| {
-            let _ = panel.update(&mut world, |state, _| -> Result<()> {
+            let _ = panel.update(&mut world, |state, _| -> anyhow::Result<()> {
                 state.count += 1;
                 panic!("expected unwind");
             });
@@ -55,7 +54,7 @@ fn ordinary_state_can_create_children_and_survives_scoped_errors_and_unwinding()
 }
 
 #[test]
-fn despawn_invalidates_all_handles_and_releases_state() -> Result<()> {
+fn despawn_invalidates_all_handles_and_releases_state() -> anyhow::Result<()> {
     struct State(Rc<()>);
     let mut world = World::default();
     let lifetime = Rc::new(());
@@ -76,7 +75,7 @@ fn despawn_invalidates_all_handles_and_releases_state() -> Result<()> {
 }
 
 #[test]
-fn queries_filter_components_and_reject_duplicate_mutable_access() -> Result<()> {
+fn queries_filter_components_and_reject_duplicate_mutable_access() -> anyhow::Result<()> {
     let mut world = World::default();
     let mut moving = Entity::new();
     assert!(moving.add_component(Position(99.0)).is_none());

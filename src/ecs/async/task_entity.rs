@@ -9,7 +9,6 @@ use std::{
 
 use super::{Task, TaskExecutor};
 use crate::ecs::{Component, Entity, World};
-use anyhow::Result;
 
 /// An entity owning an asynchronous operation. Its output is discarded.
 /// Despawning the entity cancels its task. Completed entities remain until despawned.
@@ -60,7 +59,7 @@ struct TaskState {
 }
 impl Component for TaskState {}
 
-pub(crate) fn start_tasks(world: &mut World, executor: &TaskExecutor) -> Result<()> {
+pub(crate) fn start_tasks(world: &mut World, executor: &TaskExecutor) -> anyhow::Result<()> {
     for (_, mut state) in world.query_mut::<TaskState>() {
         if let Some(future) = state.future.take() {
             state.task = Some(executor.spawn_local(future)?);

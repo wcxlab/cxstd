@@ -4,11 +4,10 @@
 //! access. Both retain their storage borrow for the lifetime of the guard.
 //!
 //! ```
-//! use anyhow::Result;
 //! use cxstd::{Res, ResMut, Resource, Resources};
 //! struct Counter(u32);
 //! impl Resource for Counter {}
-//! # fn main() -> Result<()> {
+//! # fn main() -> anyhow::Result<()> {
 //! let mut resources = Resources::default();
 //! resources.add(Counter(1))?;
 //! {
@@ -41,7 +40,6 @@ use std::{
 use anyhow::{anyhow, ensure};
 
 use crate::{Ref, RefMut};
-use anyhow::Result;
 
 /// Marks a type that can be registered as a resource.
 ///
@@ -120,7 +118,7 @@ pub struct Resources {
 
 impl Resources {
     /// Clones share this store. Adding another type does not invalidate active guards.
-    pub fn add<T: Resource>(&self, resource: T) -> Result<Option<T>> {
+    pub fn add<T: Resource>(&self, resource: T) -> anyhow::Result<Option<T>> {
         let previous = if let Some(slot) = self.values.get(&TypeId::of::<T>()) {
             let mut slot = slot
                 .try_borrow_mut()
@@ -149,7 +147,7 @@ impl Resources {
         self.values.get(&TypeId::of::<T>()).is_some()
     }
 
-    pub fn get<T: Resource>(&self) -> Result<Res<'_, T>> {
+    pub fn get<T: Resource>(&self) -> anyhow::Result<Res<'_, T>> {
         let value = self
             .slot::<T>()?
             .try_borrow()
@@ -161,7 +159,7 @@ impl Resources {
         })
     }
 
-    pub fn get_mut<T: Resource>(&self) -> Result<ResMut<'_, T>> {
+    pub fn get_mut<T: Resource>(&self) -> anyhow::Result<ResMut<'_, T>> {
         let value = self
             .slot::<T>()?
             .try_borrow_mut()
@@ -177,7 +175,7 @@ impl Resources {
 
     /// Temporarily remove a resource without retaining a borrow of the storage.
     /// The guard restores it on drop, including errors and unwinding.
-    pub fn scope<T: Resource>(&self) -> Result<ResourceScope<T>> {
+    pub fn scope<T: Resource>(&self) -> anyhow::Result<ResourceScope<T>> {
         let slot = self.slot::<T>()?;
         let value = slot
             .try_borrow_mut()
@@ -202,7 +200,7 @@ impl AsRef<Resources> for Resources {
 }
 
 impl Resources {
-    fn slot<T: Resource>(&self) -> Result<&Slot> {
+    fn slot<T: Resource>(&self) -> anyhow::Result<&Slot> {
         self.values
             .get(&TypeId::of::<T>())
             .ok_or_else(|| anyhow!("resource {} is absent", type_name::<T>()))

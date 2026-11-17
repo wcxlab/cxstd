@@ -5,7 +5,6 @@ use std::rc::Rc;
 use crate::KeyCode;
 use crate::platform::PlatformEventMessage;
 use crate::platform::backend::sdl::{SdlContext, SdlInstance};
-use anyhow::Result;
 
 pub struct EventSubsystem {
     native: SdlInstance,
@@ -23,7 +22,7 @@ impl EventSubsystem {
 }
 
 impl EventSubsystem {
-    pub(in crate::platform) fn new(context: Rc<SdlContext>) -> Result<Self> {
+    pub(in crate::platform) fn new(context: Rc<SdlContext>) -> anyhow::Result<Self> {
         anyhow::ensure!(
             !context.event_subsystem_taken.replace(true),
             "the platform thread already has an event subsystem"

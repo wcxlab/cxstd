@@ -1,23 +1,64 @@
 //! Convert typed functions through `IntoSystem::into_system()`.
+//! Ordinary functions take SystemContext followed by one dependency parameter.
+//! Dependencies can be a tuple or a custom SystemParam; use () when none are needed.
+//! Exclusive World/host functions remain available as a separate low-level interface.
+//!
+//! A context cannot appear after another injected parameter:
+//! ```compile_fail
+//! use cxstd::ecs::{Ecs, Res, Resource, SystemContext};
+//! struct Value;
+//! impl Resource for Value {}
+//! fn misplaced(_: Res<Value>, _: SystemContext) {}
+//! fn register(ecs: &mut Ecs) { ecs.add_system("update", misplaced); }
+//! ```
+//! Every ordinary function must include the context:
+//! ```compile_fail
+//! use cxstd::ecs::{Ecs, Res, Resource};
+//! struct Value;
+//! impl Resource for Value {}
+//! fn missing(_: Res<Value>) {}
+//! fn register(ecs: &mut Ecs) { ecs.add_system("update", missing); }
+//! ```
+//! Plugin setup capabilities cannot be requested by a system:
+//! ```compile_fail
+//! use cxstd::ecs::{Ecs, PluginContext};
+//! fn setup(_: PluginContext, _deps: ()) {}
+//! fn register(ecs: &mut Ecs) { ecs.add_system("update", setup); }
+//! ```
+//! Dependencies must be grouped into one parameter:
+//! ```compile_fail
+//! use cxstd::ecs::{Ecs, Res, Resource, SystemContext};
+//! struct Value;
+//! impl Resource for Value {}
+//! fn separate(_: SystemContext, _: Res<Value>, _: Res<Value>) {}
+//! fn register(ecs: &mut Ecs) { ecs.add_system("update", separate); }
+//! ```
+//! Even a system without dependencies declares the parameter:
+//! ```compile_fail
+//! use cxstd::ecs::{Ecs, SystemContext};
+//! fn missing(_: SystemContext) {}
+//! fn register(ecs: &mut Ecs) { ecs.add_system("update", missing); }
+//! ```
 
 use std::marker::PhantomData;
 
-use super::{EcsContext, Res, Resource, System, SystemAccess, SystemInput, SystemParam, World};
-use anyhow::Result;
+use super::{
+    EcsContext, Res, Resource, System, SystemAccess, SystemContext, SystemInput, SystemParam, World,
+};
 
 /// Function systems may return either unit or the framework's fallible result.
 pub trait SystemOutput {
-    fn into_result(self) -> Result<()>;
+    fn into_result(self) -> anyhow::Result<()>;
 }
 
 impl SystemOutput for () {
-    fn into_result(self) -> Result<()> {
+    fn into_result(self) -> anyhow::Result<()> {
         Ok(())
     }
 }
 
-impl SystemOutput for Result<()> {
-    fn into_result(self) -> Result<()> {
+impl SystemOutput for anyhow::Result<()> {
+    fn into_result(self) -> anyhow::Result<()> {
         self
     }
 }
@@ -44,11 +85,15 @@ impl<C, S: System<C>> IntoSystem<C, IsSystem> for S {
     }
 }
 
-/// A function's inferred parameter tuple and invocation adapter.
+/// A function's inferred dependencies and invocation adapter.
 pub trait SystemParamFunction<C: 'static, Marker>: 'static {
     type Param: SystemParam<C>;
 
-    fn call(&mut self, params: <Self::Param as SystemParam<C>>::Item<'_>) -> Result<()>;
+    fn call<'w>(
+        &mut self,
+        ctx: SystemContext<'w, C>,
+        deps: <Self::Param as SystemParam<C>>::Item<'w>,
+    ) -> anyhow::Result<()>;
 }
 
 pub struct FunctionSystem<F, Marker, C> {
@@ -76,17 +121,22 @@ impl<C: 'static, F, Marker: 'static> System<C> for FunctionSystem<F, Marker, C>
 where
     F: SystemParamFunction<C, Marker>,
 {
-    fn run(&mut self, world: &mut World, context: &mut C, access: EcsContext<'_, C>) -> Result<()> {
+    fn run(
+        &mut self,
+        world: &mut World,
+        context: &mut C,
+        access: EcsContext<'_, C>,
+    ) -> anyhow::Result<()> {
         if !self.validated {
             F::Param::access(&mut SystemAccess::default())?;
             self.validated = true;
         }
-        let params = F::Param::fetch(SystemInput {
+        let deps = F::Param::fetch(SystemInput {
             world,
             context,
             access,
         })?;
-        self.function.call(params)
+        self.function.call(SystemContext { world, access }, deps)
     }
 
     fn name(&self) -> &str {
@@ -94,37 +144,30 @@ where
     }
 }
 
-macro_rules! impl_functions {
-    ($($p:ident),*) => {
-        impl<Host: 'static, Func, Out, $($p: SystemParam<Host> + 'static),*> SystemParamFunction<Host, fn($($p),*) -> Out> for Func
-        where
-            Func: FnMut($($p),*) -> Out + 'static,
-            for<'w> Func: FnMut($($p::Item<'w>),*) -> Out,
-            Out: SystemOutput,
-        {
-            type Param = ($($p,)*);
+impl<Host: 'static, Func, Out, Deps: SystemParam<Host> + 'static>
+    SystemParamFunction<Host, fn(SystemContext<'static, Host>, Deps) -> Out> for Func
+where
+    Func: FnMut(SystemContext<'_, Host>, Deps) -> Out + 'static,
+    for<'w> Func: FnMut(SystemContext<'w, Host>, Deps::Item<'w>) -> Out,
+    Out: SystemOutput,
+{
+    type Param = Deps;
 
-            #[allow(non_snake_case)]
-            fn call(&mut self, params: <Self::Param as SystemParam<Host>>::Item<'_>) -> Result<()> {
-                fn call_inner<Out, $($p,)*>(mut f: impl FnMut($($p),*) -> Out, $($p: $p,)*) -> Out {
-                    f($($p),*)
-                }
-                let ($($p,)*) = params;
-                call_inner(self, $($p,)*).into_result()
-            }
+    fn call<'w>(
+        &mut self,
+        ctx: SystemContext<'w, Host>,
+        deps: <Self::Param as SystemParam<Host>>::Item<'w>,
+    ) -> anyhow::Result<()> {
+        fn call_inner<'w, Host, Deps, Out>(
+            mut f: impl FnMut(SystemContext<'w, Host>, Deps) -> Out,
+            ctx: SystemContext<'w, Host>,
+            deps: Deps,
+        ) -> Out {
+            f(ctx, deps)
         }
-    };
+        call_inner(self, ctx, deps).into_result()
+    }
 }
-
-impl_functions!();
-impl_functions!(A);
-impl_functions!(A, B);
-impl_functions!(A, B, C);
-impl_functions!(A, B, C, D);
-impl_functions!(A, B, C, D, E);
-impl_functions!(A, B, C, D, E, F);
-impl_functions!(A, B, C, D, E, F, G);
-impl_functions!(A, B, C, D, E, F, G, H);
 
 pub struct ExclusiveSystem<F, Marker, C> {
     function: F,
@@ -156,7 +199,12 @@ where
     F: FnMut(&mut World, Res<'_, T>) -> Out + 'static,
     Out: SystemOutput + 'static,
 {
-    fn run(&mut self, world: &mut World, _: &mut Host, access: EcsContext<'_, Host>) -> Result<()> {
+    fn run(
+        &mut self,
+        world: &mut World,
+        _: &mut Host,
+        access: EcsContext<'_, Host>,
+    ) -> anyhow::Result<()> {
         let resource = access.resource::<T>()?;
         (self.function)(world, resource).into_result()
     }
@@ -185,7 +233,7 @@ macro_rules! impl_exclusive {
             F: FnMut($($ty),*) -> Out + 'static,
             Out: SystemOutput + 'static,
         {
-            fn run(&mut self, $world: &mut World, $context: &mut Host, _access: EcsContext<'_, Host>) -> Result<()> {
+            fn run(&mut self, $world: &mut World, $context: &mut Host, _access: EcsContext<'_, Host>) -> anyhow::Result<()> {
                 (self.function)($($arg),*).into_result()
             }
 

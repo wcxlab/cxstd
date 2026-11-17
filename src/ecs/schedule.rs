@@ -1,12 +1,16 @@
 use anyhow::Context as _;
 
 use super::{EcsContext, IntoSystem, World};
-use anyhow::Result;
 
 /// A persistent unit of serial execution. Function systems inject declared parameters.
 /// Systems may retain non-Send state, such as an event cursor or a UI runtime.
 pub trait System<C = ()>: 'static {
-    fn run(&mut self, world: &mut World, context: &mut C, access: EcsContext<'_, C>) -> Result<()>;
+    fn run(
+        &mut self,
+        world: &mut World,
+        context: &mut C,
+        access: EcsContext<'_, C>,
+    ) -> anyhow::Result<()>;
 
     fn name(&self) -> &str {
         std::any::type_name::<Self>()
@@ -31,6 +35,10 @@ impl<C> Default for Schedule<C> {
 }
 
 impl<C: 'static> Schedule<C> {
+    pub(crate) fn add_registered_system(&mut self, system: Box<dyn System<C>>) {
+        self.steps.push(Step::System(system));
+    }
+
     pub fn add_system<M>(&mut self, system: impl IntoSystem<C, M>) -> &mut Self {
         self.steps
             .push(Step::System(Box::new(system.into_system())));
@@ -49,7 +57,7 @@ impl<C: 'static> Schedule<C> {
         world: &mut World,
         context: &mut C,
         access: EcsContext<'_, C>,
-    ) -> Result<()> {
+    ) -> anyhow::Result<()> {
         for step in &mut self.steps {
             match step {
                 Step::System(system) => {

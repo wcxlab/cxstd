@@ -4,9 +4,7 @@
 mod render;
 pub(super) mod view2d;
 pub(super) mod view3d;
-
-use anyhow::Result;
-use cxstd::ecs::{Ecs, Plugin};
+use cxstd::ecs::{Ecs, PluginRef};
 
 use crate::app_core::AppCore;
 use render::RenderPlugin;
@@ -15,46 +13,40 @@ use view3d::View3dPlugin;
 
 pub(super) struct AppView {
     ecs: Ecs,
-    view2d: View2dPlugin,
-    view3d: View3dPlugin,
-    render: RenderPlugin,
+    view2d: PluginRef<View2dPlugin>,
+    view3d: PluginRef<View3dPlugin>,
+    render: PluginRef<RenderPlugin>,
 }
 
 impl AppView {
-    pub(super) fn new() -> Result<Self> {
-        let mut view = Self {
-            ecs: Ecs::new()?,
-            view2d: View2dPlugin::default(),
-            view3d: View3dPlugin::default(),
-            render: RenderPlugin::default(),
-        };
-        view.view2d.load(&mut view.ecs)?;
-        view.view3d.load(&mut view.ecs)?;
-        view.render.load(&mut view.ecs)?;
-        Ok(view)
+    pub(super) fn new() -> anyhow::Result<Self> {
+        let mut ecs = Ecs::new()?;
+        let view2d = ecs.add_plugin(View2dPlugin::default())?;
+        let view3d = ecs.add_plugin(View3dPlugin::default())?;
+        let render = ecs.add_plugin(RenderPlugin::default())?;
+        Ok(Self {
+            ecs,
+            view2d,
+            view3d,
+            render,
+        })
     }
 
-    pub(super) fn update(&mut self, core: &AppCore) -> Result<()> {
+    pub(super) fn update(&mut self, core: &AppCore) -> anyhow::Result<()> {
         self.ecs.add_resource(core.status()?)?;
-        self.ecs.run_schedule("update")
+        self.ecs.run_stage("update")
     }
 
-    pub(super) fn render(&mut self) -> Result<()> {
-        self.ecs.run_schedule("render")
+    pub(super) fn render(&mut self) -> anyhow::Result<()> {
+        self.ecs.run_stage("render")
     }
 }
 
 impl Drop for AppView {
     fn drop(&mut self) {
-        if let Err(error) = self.render.unload(&mut self.ecs) {
-            eprintln!("Failed to unload RenderPlugin: {error:#}");
-        }
-        if let Err(error) = self.view3d.unload(&mut self.ecs) {
-            eprintln!("Failed to unload View3dPlugin: {error:#}");
-        }
-        if let Err(error) = self.view2d.unload(&mut self.ecs) {
-            eprintln!("Failed to unload View2dPlugin: {error:#}");
-        }
+        self.ecs.remove_plugin(self.render).unwrap();
+        self.ecs.remove_plugin(self.view3d).unwrap();
+        self.ecs.remove_plugin(self.view2d).unwrap();
     }
 }
 
@@ -64,7 +56,7 @@ mod tests {
     use crate::app_core::Status;
 
     #[tokio::test]
-    async fn status_is_copied_from_core_before_view_updates() -> Result<()> {
+    async fn status_is_copied_from_core_before_view_updates() -> anyhow::Result<()> {
         let mut core = AppCore::new()?;
         let mut view = AppView::new()?;
         assert!(view.ecs.resource::<Status>().is_err());

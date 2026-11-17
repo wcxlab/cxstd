@@ -11,7 +11,6 @@ use std::{
 
 use super::World;
 use crate::Ref;
-use anyhow::Result;
 
 static NEXT_ENTITY: AtomicU64 = AtomicU64::new(1);
 
@@ -81,7 +80,7 @@ impl<T: 'static> EntityRef<T> {
         self.entity
     }
 
-    pub fn read(self, world: &World) -> Result<Ref<'_, T>> {
+    pub fn read(self, world: &World) -> anyhow::Result<Ref<'_, T>> {
         world.state(self)
     }
 
@@ -91,8 +90,8 @@ impl<T: 'static> EntityRef<T> {
     pub fn update<R>(
         self,
         world: &mut World,
-        update: impl FnOnce(&mut T, &mut World) -> Result<R>,
-    ) -> Result<R> {
+        update: impl FnOnce(&mut T, &mut World) -> anyhow::Result<R>,
+    ) -> anyhow::Result<R> {
         world.with_state(self, update)
     }
 }

@@ -1,17 +1,17 @@
-//! Create a `View3dPlugin::default()` instance and call `plugin.load(ecs)` to register
+//! Call `ecs.add_plugin(View3dPlugin::default())` to register
 //! the View3d render system.
-
-use anyhow::Result;
-use cxstd::ecs::{Ecs, Plugin};
+use cxstd::ecs::{Plugin, PluginContext};
 
 #[derive(Default)]
 pub(super) struct View3dPlugin;
 
 impl Plugin for View3dPlugin {
-    fn load(&mut self, ecs: &mut Ecs) -> Result<()> {
-        ecs.add_system("render", build_view3d_system);
+    type LoadParams = ();
+
+    fn load(&mut self, ctx: PluginContext, _deps: ()) -> anyhow::Result<()> {
+        ctx.add_system("render", build_view3d_system);
         Ok(())
     }
 }
 
-pub(crate) fn build_view3d_system() {}
+pub(crate) fn build_view3d_system(_: cxstd::ecs::SystemContext, _deps: ()) {}

@@ -13,7 +13,6 @@ pub use subsystem::GamepadSubsystem;
 use std::{cell::Cell, fmt, rc::Rc, time::Duration};
 
 use crate::{GamepadAxis, KeyCode};
-use anyhow::Result;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GamepadType {
@@ -163,7 +162,7 @@ impl PartialEq for Gamepad {
 /// Enumerate standard gamepads, initializing native support automatically.
 /// Disconnected slots are None; reconnecting devices receive a new handle.
 /// Call on the window thread. The native backend is never exposed.
-pub fn get_gamepads() -> Result<Vec<Option<Gamepad>>> {
+pub fn get_gamepads() -> anyhow::Result<Vec<Option<Gamepad>>> {
     crate::platform::backend::sdl::get_gamepads()
 }
 

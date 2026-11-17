@@ -1,15 +1,13 @@
 mod support;
 
-use std::{cell::Cell, future::pending, rc::Rc};
-
-use anyhow::Result;
 use cxstd::ecs::{Component, TaskEntity};
+use std::{cell::Cell, future::pending, rc::Rc};
 
 struct Label;
 impl Component for Label {}
 
 #[test]
-fn task_entities_start_on_flush_and_complete_only_once_on_the_owner_thread() -> Result<()> {
+fn task_entities_start_on_flush_and_complete_only_once_on_the_owner_thread() -> anyhow::Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     let owner = std::thread::current().id();
     let calls = Rc::new(Cell::new(0));
@@ -40,7 +38,7 @@ impl Drop for Lifetime {
 }
 
 #[test]
-fn despawning_or_dropping_the_world_cancels_owned_tasks() -> Result<()> {
+fn despawning_or_dropping_the_world_cancels_owned_tasks() -> anyhow::Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     let released = Rc::new(Cell::new(false));
     let lifetime = Lifetime(released.clone());
@@ -67,7 +65,7 @@ fn despawning_or_dropping_the_world_cancels_owned_tasks() -> Result<()> {
 }
 
 #[test]
-fn despawning_before_first_flush_never_runs_the_future() -> Result<()> {
+fn despawning_before_first_flush_never_runs_the_future() -> anyhow::Result<()> {
     let (_runtime, mut ecs) = support::ecs::<()>()?;
     let calls = Rc::new(Cell::new(0));
     let observed = calls.clone();
@@ -81,7 +79,7 @@ fn despawning_before_first_flush_never_runs_the_future() -> Result<()> {
 }
 
 #[test]
-fn ecs_preserves_a_typed_task_error_when_propagating_it_through_anyhow() -> Result<()> {
+fn ecs_preserves_a_typed_task_error_when_propagating_it_through_anyhow() -> anyhow::Result<()> {
     use anyhow::Context as _;
     use cxstd::ecs::AsyncClosed;
 

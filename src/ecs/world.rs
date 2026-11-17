@@ -7,7 +7,6 @@ use anyhow::{anyhow, bail, ensure};
 
 use super::{Component, Entity, EntityId, EntityRef};
 use crate::{Ref, RefMut};
-use anyhow::Result;
 
 type Value = Box<dyn Any>;
 
@@ -28,7 +27,7 @@ impl World {
     }
 
     /// Access an existing entity to add or replace its components.
-    pub fn entity_mut(&mut self, entity: EntityId) -> Result<&mut Entity> {
+    pub fn entity_mut(&mut self, entity: EntityId) -> anyhow::Result<&mut Entity> {
         self.data_mut(entity)
     }
 
@@ -45,13 +44,13 @@ impl World {
         self.entities.remove(&entity).is_some()
     }
 
-    pub fn typed<T: 'static>(&self, entity: EntityId) -> Result<EntityRef<T>> {
+    pub fn typed<T: 'static>(&self, entity: EntityId) -> anyhow::Result<EntityRef<T>> {
         let handle = EntityRef::new(entity);
         self.state(handle)?;
         Ok(handle)
     }
 
-    pub fn state<T: 'static>(&self, entity: EntityRef<T>) -> Result<Ref<'_, T>> {
+    pub fn state<T: 'static>(&self, entity: EntityRef<T>) -> anyhow::Result<Ref<'_, T>> {
         let value = self
             .data(entity.entity())?
             .state
@@ -63,7 +62,7 @@ impl World {
             .into())
     }
 
-    pub fn state_mut<T: 'static>(&mut self, entity: EntityRef<T>) -> Result<RefMut<'_, T>> {
+    pub fn state_mut<T: 'static>(&mut self, entity: EntityRef<T>) -> anyhow::Result<RefMut<'_, T>> {
         let value = self
             .data_mut(entity.entity())?
             .state
@@ -80,8 +79,8 @@ impl World {
     pub fn with_state<T: 'static, R>(
         &mut self,
         entity: EntityRef<T>,
-        update: impl FnOnce(&mut T, &mut World) -> Result<R>,
-    ) -> Result<R> {
+        update: impl FnOnce(&mut T, &mut World) -> anyhow::Result<R>,
+    ) -> anyhow::Result<R> {
         self.state(entity)?;
         let value = self.data_mut(entity.entity())?.state.take();
         let mut scope = StateScope {
@@ -93,7 +92,7 @@ impl World {
         update(state, scope.world)
     }
 
-    pub fn remove<C: Component>(&mut self, entity: EntityId) -> Result<Option<C>> {
+    pub fn remove<C: Component>(&mut self, entity: EntityId) -> anyhow::Result<Option<C>> {
         Ok(self
             .data_mut(entity)?
             .components
@@ -106,7 +105,7 @@ impl World {
             }))
     }
 
-    pub fn component<C: Component>(&self, entity: EntityId) -> Result<Ref<'_, C>> {
+    pub fn component<C: Component>(&self, entity: EntityId) -> anyhow::Result<Ref<'_, C>> {
         let value = self
             .data(entity)?
             .components
@@ -122,7 +121,10 @@ impl World {
         .into())
     }
 
-    pub fn component_mut<C: Component>(&mut self, entity: EntityId) -> Result<RefMut<'_, C>> {
+    pub fn component_mut<C: Component>(
+        &mut self,
+        entity: EntityId,
+    ) -> anyhow::Result<RefMut<'_, C>> {
         Ok(self
             .data_mut(entity)?
             .components
@@ -158,7 +160,7 @@ impl World {
     /// Select entities with two distinct component types, without unsafe aliasing.
     pub fn query2_mut<A: Component, B: Component>(
         &mut self,
-    ) -> Result<impl Iterator<Item = (EntityId, RefMut<'_, A>, RefMut<'_, B>)>> {
+    ) -> anyhow::Result<impl Iterator<Item = (EntityId, RefMut<'_, A>, RefMut<'_, B>)>> {
         let a = TypeId::of::<A>();
         let b = TypeId::of::<B>();
         ensure!(
@@ -201,7 +203,7 @@ impl World {
     pub(super) fn borrow_component_mut<C: Component>(
         &self,
         entity: EntityId,
-    ) -> Result<RefMut<'_, C>> {
+    ) -> anyhow::Result<RefMut<'_, C>> {
         let value = self
             .data(entity)?
             .components
@@ -217,13 +219,13 @@ impl World {
         .into())
     }
 
-    fn data(&self, entity: EntityId) -> Result<&Entity> {
+    fn data(&self, entity: EntityId) -> anyhow::Result<&Entity> {
         self.entities
             .get(&entity)
             .ok_or_else(|| anyhow!("entity {entity:?} does not exist in this World"))
     }
 
-    fn data_mut(&mut self, entity: EntityId) -> Result<&mut Entity> {
+    fn data_mut(&mut self, entity: EntityId) -> anyhow::Result<&mut Entity> {
         match self.entities.get_mut(&entity) {
             Some(data) => Ok(data),
             None => bail!("entity {entity:?} does not exist in this World"),
