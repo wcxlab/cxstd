@@ -13,27 +13,29 @@ fn selected_stages_follow_caller_order_and_preserve_system_state() -> anyhow::Re
     ecs.add_schedule("second").add_schedule("first");
     ecs.add_system(
         "first",
-        |_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| {
+        support::system(|_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| {
             let mut trace = deps;
             trace.0.push(1)
-        },
+        }),
     );
     let mut calls = 0;
     ecs.add_system(
         "second",
-        move |_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| {
-            let mut trace = deps;
-            calls += 1;
-            trace.0.push(calls * 10);
-        },
+        support::system(
+            move |_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| {
+                let mut trace = deps;
+                calls += 1;
+                trace.0.push(calls * 10);
+            },
+        ),
     );
     ecs.add_schedule("second");
     ecs.add_system(
         "third",
-        |_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| {
+        support::system(|_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| {
             let mut trace = deps;
             trace.0.push(3)
-        },
+        }),
     );
     ecs.run_stage("first")?;
     assert_eq!(ecs.resource::<Trace>()?.0, [1]);
@@ -50,24 +52,26 @@ fn stage_errors_preserve_changes_and_stop_later_stages() -> anyhow::Result<()> {
     ecs.add_resource(Trace::default())?;
     ecs.add_system(
         "first",
-        |_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| {
+        support::system(|_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| {
             let mut trace = deps;
             trace.0.push(1)
-        },
+        }),
     );
     ecs.add_system(
         "second",
-        |_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| -> anyhow::Result<()> {
-            let mut trace = deps;
-            trace.0.push(2);
-            anyhow::bail!("expected failure")
-        },
+        support::system(
+            |_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| -> anyhow::Result<()> {
+                let mut trace = deps;
+                trace.0.push(2);
+                anyhow::bail!("expected failure")
+            },
+        ),
     );
     ecs.add_system(
         "third",
-        |_: cxstd::ecs::SystemContext<'_, _>, _deps: ()| -> () {
+        support::system(|_: cxstd::ecs::SystemContext<'_, _>, _deps: ()| -> () {
             panic!("later stage ran");
-        },
+        }),
     );
     let error = format!("{:#}", ecs.run().unwrap_err());
     assert!(error.contains("second"));
@@ -84,21 +88,21 @@ fn command_barriers_apply_to_the_owning_ecs_world() -> anyhow::Result<()> {
     let other = second.world_mut().typed::<u32>(other)?;
     first.add_system(
         "first",
-        |_: cxstd::ecs::SystemContext<'_, _>, deps: CommandQueue| {
+        support::system(|_: cxstd::ecs::SystemContext<'_, _>, deps: CommandQueue| {
             let commands = deps;
             commands.queue(|world, _| {
                 world.add_entity(Entity::with_state(9_u32));
                 Ok(())
             });
-        },
+        }),
     );
     first.add_apply_deferred("first");
     first.add_system(
         "second",
-        |_: cxstd::ecs::SystemContext<'_, _>, deps: &World| {
+        support::system(|_: cxstd::ecs::SystemContext<'_, _>, deps: &World| {
             let world = deps;
             assert_eq!(world.entities().count(), 1);
-        },
+        }),
     );
     first.run()?;
     assert!(!first.world().contains(other.entity()));
@@ -117,20 +121,22 @@ fn stage_update_advances_facilities_and_runs_only_the_selected_stage_once() -> a
     });
     ecs.add_system(
         "first",
-        |_: cxstd::ecs::SystemContext<'_, _>, deps: (ResMut<Trace>, CommandQueue)| {
-            let (mut trace, commands) = deps;
-            trace.0.push(1);
-            commands.queue_with(|_, _, access| {
-                access.resources().get_mut::<Trace>()?.0.push(2);
-                Ok(())
-            });
-        },
+        support::system(
+            |_: cxstd::ecs::SystemContext<'_, _>, deps: (ResMut<Trace>, CommandQueue)| {
+                let (mut trace, commands) = deps;
+                trace.0.push(1);
+                commands.queue_with(|_, _, access| {
+                    access.resources().get_mut::<Trace>()?.0.push(2);
+                    Ok(())
+                });
+            },
+        ),
     );
     ecs.add_system(
         "second",
-        |_: cxstd::ecs::SystemContext<'_, _>, _deps: ()| -> () {
+        support::system(|_: cxstd::ecs::SystemContext<'_, _>, _deps: ()| -> () {
             panic!("unselected stage ran");
-        },
+        }),
     );
     ecs.run_stage("first")?;
     assert_eq!(ecs.resource::<Trace>()?.0, [0, 1]);

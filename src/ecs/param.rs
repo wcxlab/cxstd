@@ -1,5 +1,5 @@
-//! Function parameters declare their access through `SystemParam::access` and
-//! acquire borrowed values through `SystemParam::fetch` before the system runs.
+//! Dependencies declare their access through `Dependences::access` and
+//! acquire borrowed values through `Dependences::fetch` before the system runs.
 //! Facilities come from the executing Ecs; the application host is independent.
 
 use std::{
@@ -29,9 +29,9 @@ impl<C> Clone for SystemInput<'_, C> {
     }
 }
 
-/// A typed function parameter. Fetching uses safe borrowed guards; custom
+/// A dependency type. Fetching uses safe borrowed guards; custom
 /// implementations must also declare accesses so conflicts fail before execution.
-pub trait SystemParam<C: 'static = ()>: Sized {
+pub trait Dependences<C: 'static = ()>: Sized {
     type Item<'w>;
 
     fn access(access: &mut SystemAccess) -> anyhow::Result<()>;
@@ -92,7 +92,7 @@ impl AccessSet {
     }
 }
 
-impl<C: 'static, T: Resource> SystemParam<C> for Res<'_, T> {
+impl<C: 'static, T: Resource> Dependences<C> for Res<'_, T> {
     type Item<'w> = Res<'w, T>;
 
     fn access(access: &mut SystemAccess) -> anyhow::Result<()> {
@@ -104,7 +104,7 @@ impl<C: 'static, T: Resource> SystemParam<C> for Res<'_, T> {
     }
 }
 
-impl<C: 'static, T: Resource> SystemParam<C> for ResMut<'_, T> {
+impl<C: 'static, T: Resource> Dependences<C> for ResMut<'_, T> {
     type Item<'w> = ResMut<'w, T>;
 
     fn access(access: &mut SystemAccess) -> anyhow::Result<()> {
@@ -116,7 +116,7 @@ impl<C: 'static, T: Resource> SystemParam<C> for ResMut<'_, T> {
     }
 }
 
-impl<C: 'static> SystemParam<C> for &World {
+impl<C: 'static> Dependences<C> for &World {
     type Item<'w> = &'w World;
 
     fn access(access: &mut SystemAccess) -> anyhow::Result<()> {
@@ -128,7 +128,7 @@ impl<C: 'static> SystemParam<C> for &World {
     }
 }
 
-impl<C: 'static> SystemParam<C> for &Resources {
+impl<C: 'static> Dependences<C> for &Resources {
     type Item<'w> = &'w Resources;
 
     fn access(access: &mut SystemAccess) -> anyhow::Result<()> {
@@ -140,7 +140,7 @@ impl<C: 'static> SystemParam<C> for &Resources {
     }
 }
 
-impl<C: 'static> SystemParam<C> for CommandQueue<C> {
+impl<C: 'static> Dependences<C> for CommandQueue<C> {
     type Item<'w> = CommandQueue<C>;
 
     fn access(_: &mut SystemAccess) -> anyhow::Result<()> {
@@ -152,7 +152,7 @@ impl<C: 'static> SystemParam<C> for CommandQueue<C> {
     }
 }
 
-impl<C: 'static> SystemParam<C> for &TaskExecutor {
+impl<C: 'static> Dependences<C> for &TaskExecutor {
     type Item<'w> = &'w TaskExecutor;
 
     fn access(_: &mut SystemAccess) -> anyhow::Result<()> {
@@ -164,7 +164,7 @@ impl<C: 'static> SystemParam<C> for &TaskExecutor {
     }
 }
 
-impl<C: 'static> SystemParam<C> for &EventDispatcher<EntityId, World, C> {
+impl<C: 'static> Dependences<C> for &EventDispatcher<EntityId, World, C> {
     type Item<'w> = &'w EventDispatcher<EntityId, World, C>;
 
     fn access(_: &mut SystemAccess) -> anyhow::Result<()> {
@@ -178,7 +178,7 @@ impl<C: 'static> SystemParam<C> for &EventDispatcher<EntityId, World, C> {
 
 macro_rules! impl_params {
     ($($p:ident),*) => {
-        impl<Host: 'static, $($p: SystemParam<Host>),*> SystemParam<Host> for ($($p,)*) {
+        impl<Host: 'static, $($p: Dependences<Host>),*> Dependences<Host> for ($($p,)*) {
             type Item<'w> = ($($p::Item<'w>,)*);
 
             fn access(_access: &mut SystemAccess) -> anyhow::Result<()> {

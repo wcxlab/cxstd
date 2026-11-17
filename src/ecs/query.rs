@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use anyhow::ensure;
 
-use super::{Component, EntityId, SystemAccess, SystemInput, SystemParam, World};
+use super::{Component, Dependences, EntityId, SystemAccess, SystemInput, World};
 use crate::{Ref, RefMut};
 
 /// The component access and fetched item for one entity. Tuples combine fields
@@ -67,7 +67,7 @@ impl<D: ReadOnlyQueryData> Query<'_, D> {
     }
 }
 
-impl<C: 'static, D: QueryData + 'static> SystemParam<C> for Query<'_, D> {
+impl<C: 'static, D: QueryData + 'static> Dependences<C> for Query<'_, D> {
     type Item<'w> = Query<'w, D>;
 
     fn access(access: &mut SystemAccess) -> anyhow::Result<()> {

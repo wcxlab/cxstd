@@ -22,7 +22,7 @@ pub struct EcsContext<'w, C = ()> {
     pub(crate) registrations: Option<&'w Registrations<C>>,
 }
 
-/// First argument of ordinary function systems. Entity changes are queued;
+/// First argument of System::run after self. Entity changes are queued;
 /// dynamic resource and component lookups use runtime borrow checks.
 ///
 /// Systems cannot register other systems:
@@ -169,10 +169,8 @@ impl<C: 'static> PluginContext<'_, C> {
 
     /// Add a system to the selected stage.
     pub fn add_system<M>(&self, stage: impl Into<String>, system: impl IntoSystem<C, M>) {
-        self.registrations.push(Registration::System(
-            stage.into(),
-            Box::new(system.into_system()),
-        ));
+        self.registrations
+            .push(Registration::System(stage.into(), system.into_system()));
     }
 
     pub fn add_schedule(&self, name: impl Into<String>) {

@@ -33,10 +33,10 @@ fn host_resource_handles_share_injection_and_preserve_independent_borrows() -> a
     drop(read);
     ecs.add_system(
         "update",
-        |_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Count>| {
+        support::system(|_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Count>| {
             let mut count = deps;
             count.0 += 1
-        },
+        }),
     );
     ecs.run_stage("update")?;
     assert_eq!(resources.get::<Count>()?.0, 2);
@@ -57,39 +57,46 @@ fn entity_commands_reserve_ids_and_apply_in_order_at_barriers() -> anyhow::Resul
     let original = ecs.world_mut().add_entity(original);
     ecs.add_system(
         "build",
-        move |_: cxstd::ecs::SystemContext<'_, _>,
-              deps: (CommandQueue, ResMut<Ids>, Query<&Position>)| {
-            let (ctx, mut ids, positions) = deps;
-            assert_eq!(positions.iter().count(), 1);
-            let parent = ctx.add_state(String::from("persistent state"));
-            let child = ctx.add_entity(Entity::new());
-            ctx.add_component(parent.entity(), Position(3));
-            ctx.add_component(child, Position(4));
-            ctx.remove::<Position>(original);
-            ids.0.extend([parent.entity(), child]);
-            ctx.queue(move |world, _| {
-                assert_eq!(parent.read(world)?.as_str(), "persistent state");
-                Ok(())
-            });
-        },
+        support::system(
+            move |_: cxstd::ecs::SystemContext<'_, _>,
+                  deps: (CommandQueue, ResMut<Ids>, Query<&Position>)| {
+                let (ctx, mut ids, positions) = deps;
+                assert_eq!(positions.iter().count(), 1);
+                let parent = ctx.add_state(String::from("persistent state"));
+                let child = ctx.add_entity(Entity::new());
+                ctx.add_component(parent.entity(), Position(3));
+                ctx.add_component(child, Position(4));
+                ctx.remove::<Position>(original);
+                ids.0.extend([parent.entity(), child]);
+                ctx.queue(move |world, _| {
+                    assert_eq!(parent.read(world)?.as_str(), "persistent state");
+                    Ok(())
+                });
+            },
+        ),
     );
     ecs.add_system(
         "build",
-        move |_: cxstd::ecs::SystemContext<'_, _>, deps: (&World, Res<Ids>)| {
-            let (world, ids) = deps;
-            assert!(!world.contains(ids.0[0]));
-            assert!(!world.contains(ids.0[1]));
-            assert_eq!(world.component::<Position>(original).unwrap().0, 5);
-        },
+        support::system(
+            move |_: cxstd::ecs::SystemContext<'_, _>, deps: (&World, Res<Ids>)| {
+                let (world, ids) = deps;
+                assert!(!world.contains(ids.0[0]));
+                assert!(!world.contains(ids.0[1]));
+                assert_eq!(world.component::<Position>(original).unwrap().0, 5);
+            },
+        ),
     );
     ecs.add_apply_deferred("build");
     ecs.add_system(
         "after",
-        |_: cxstd::ecs::SystemContext<'_, _>, deps: (CommandQueue, Res<Ids>, Query<&Position>)| {
-            let (ctx, ids, positions) = deps;
-            assert_eq!(positions.iter().map(|position| position.0).sum::<u32>(), 7);
-            ctx.despawn(ids.0[1]);
-        },
+        support::system(
+            |_: cxstd::ecs::SystemContext<'_, _>,
+             deps: (CommandQueue, Res<Ids>, Query<&Position>)| {
+                let (ctx, ids, positions) = deps;
+                assert_eq!(positions.iter().map(|position| position.0).sum::<u32>(), 7);
+                ctx.despawn(ids.0[1]);
+            },
+        ),
     );
     ecs.run()?;
     let ids = ecs.resource::<Ids>()?.0.clone();
@@ -119,36 +126,38 @@ fn context_delivers_tasks_typed_events_and_change_notifications() -> anyhow::Res
     let observed = changes.clone();
     ecs.add_system(
         "update",
-        move |_: cxstd::ecs::SystemContext<'_, _>,
-              deps: (
-            &cxstd::ecs::TaskExecutor,
-            &EventDispatcher<EntityId, World>,
-            Res<Target>,
-            ResMut<Subscriptions>,
-        )|
-              -> anyhow::Result<()> {
-            let (tasks, events, target_id, mut keep) = deps;
-            let notify = events.clone();
-            keep.0.push(
-                events.subscribe_with(target_id.0, move |value: &u32, world, _| {
-                    *world.state_mut(target).unwrap() = *value;
-                    notify.notify(target.entity());
-                }),
-            );
-            let observed = observed.clone();
-            keep.0
-                .push(events.observe_with(target_id.0, move |world, _| {
-                    assert_eq!(*target.read(world).unwrap(), 9);
-                    observed.set(observed.get() + 1);
-                }));
-            let events = events.clone();
-            tasks
-                .spawn_local(async move {
-                    events.emit(target.entity(), 9_u32);
-                })?
-                .detach();
-            Ok(())
-        },
+        support::system(
+            move |_: cxstd::ecs::SystemContext<'_, _>,
+                  deps: (
+                &cxstd::ecs::TaskExecutor,
+                &EventDispatcher<EntityId, World>,
+                Res<Target>,
+                ResMut<Subscriptions>,
+            )|
+                  -> anyhow::Result<()> {
+                let (tasks, events, target_id, mut keep) = deps;
+                let notify = events.clone();
+                keep.0.push(
+                    events.subscribe_with(target_id.0, move |value: &u32, world, _| {
+                        *world.state_mut(target).unwrap() = *value;
+                        notify.notify(target.entity());
+                    }),
+                );
+                let observed = observed.clone();
+                keep.0
+                    .push(events.observe_with(target_id.0, move |world, _| {
+                        assert_eq!(*target.read(world).unwrap(), 9);
+                        observed.set(observed.get() + 1);
+                    }));
+                let events = events.clone();
+                tasks
+                    .spawn_local(async move {
+                        events.emit(target.entity(), 9_u32);
+                    })?
+                    .detach();
+                Ok(())
+            },
+        ),
     );
     ecs.run()?;
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -170,11 +179,13 @@ fn direct_context_resource_access_respects_existing_mutable_guards() -> anyhow::
     let resources = ecs.resources().clone();
     ecs.add_system(
         "update",
-        move |_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Ids>| {
-            let _ = deps;
-            assert!(resources.get::<Ids>().is_err());
-            assert!(resources.get_mut::<Ids>().is_err());
-        },
+        support::system(
+            move |_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Ids>| {
+                let _ = deps;
+                assert!(resources.get::<Ids>().is_err());
+                assert!(resources.get_mut::<Ids>().is_err());
+            },
+        ),
     );
     ecs.run()?;
     assert!(ecs.resource_mut::<Ids>().is_ok());

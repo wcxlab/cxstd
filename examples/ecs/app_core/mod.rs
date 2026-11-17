@@ -50,17 +50,26 @@ mod tests {
     struct Frames(usize);
     impl Resource for Frames {}
 
+    struct UpdateFrames;
+    impl cxstd::ecs::System for UpdateFrames {
+        type Deps = ResMut<'static, Frames>;
+
+        fn run(
+            &mut self,
+            _ctx: cxstd::ecs::SystemContext,
+            deps: ResMut<Frames>,
+        ) -> anyhow::Result<()> {
+            let mut frames = deps;
+            frames.0 += 1;
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn view_updates_do_not_mutate_business_state() -> anyhow::Result<()> {
         let mut core = AppCore::new()?;
         core.ecs.resources_mut().add(Frames(99))?;
-        core.ecs.add_system(
-            "update",
-            |_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Frames>| {
-                let mut frames = deps;
-                frames.0 += 1;
-            },
-        );
+        core.ecs.add_system("update", UpdateFrames);
         let business = core.ecs.world_mut().add_entity(Entity::with_state(10_u32));
         let business = core.ecs.world_mut().typed::<u32>(business)?;
         core.ecs

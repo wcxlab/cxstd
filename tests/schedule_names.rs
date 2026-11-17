@@ -12,17 +12,17 @@ fn owned_and_borrowed_names_select_the_same_schedule_without_resetting_it() -> a
     let name = format!("view{}", 2);
     ecs.add_system(
         name,
-        |_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| {
+        support::system(|_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| {
             let mut trace = deps;
             trace.0.push(1)
-        },
+        }),
     );
     ecs.add_system(
         String::from("view2"),
-        |_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| {
+        support::system(|_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| {
             let mut trace = deps;
             trace.0.push(2)
-        },
+        }),
     );
     ecs.add_schedule("view2");
     ecs.run_stage(String::from("view2"))?;
@@ -41,17 +41,17 @@ fn identical_schedule_names_are_local_to_each_ecs() -> anyhow::Result<()> {
     second.add_resource(Trace::default())?;
     first.add_system(
         "update",
-        |_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| {
+        support::system(|_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| {
             let mut trace = deps;
             trace.0.push(1)
-        },
+        }),
     );
     second.add_system(
         "update",
-        |_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| {
+        support::system(|_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Trace>| {
             let mut trace = deps;
             trace.0.push(2)
-        },
+        }),
     );
     first.run_stage("update")?;
     assert!(second.resource::<Trace>()?.0.is_empty());

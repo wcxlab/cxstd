@@ -12,9 +12,9 @@ use anyhow::{Context as _, anyhow};
 
 use super::registration::Registrations;
 use super::{
-    CommandQueue, EcsContext, EntityId, EventDispatcher, IntoSystem, Plugin, PluginContext,
-    PluginRef, Res, ResMut, Resource, Resources, Schedule, Subscription, SystemAccess,
-    SystemContext, SystemInput, SystemParam, Task, TaskExecutor, World,
+    CommandQueue, Dependences, EcsContext, EntityId, EventDispatcher, IntoSystem, Plugin,
+    PluginContext, PluginRef, Res, ResMut, Resource, Resources, Schedule, Subscription,
+    SystemAccess, SystemContext, SystemInput, Task, TaskExecutor, World,
 };
 
 /// An independent ECS instance. Schedules and systems retain registration order
@@ -164,10 +164,10 @@ impl<C: 'static> Ecs<C> {
     ) -> anyhow::Result<()> {
         let registrations = Registrations::default();
         {
-            P::LoadParams::access(&mut SystemAccess::default())?;
+            P::Deps::access(&mut SystemAccess::default())?;
             let mut access = self.facilities();
             access.registrations = Some(&registrations);
-            let deps = P::LoadParams::fetch(SystemInput {
+            let deps = P::Deps::fetch(SystemInput {
                 world: &self.world,
                 context: host,
                 access,
@@ -414,7 +414,7 @@ impl<C: 'static> Ecs<C> {
     pub(crate) fn add_registered_system(
         &mut self,
         stage: String,
-        system: Box<dyn super::System<C>>,
+        system: super::system::SystemRunner<C>,
     ) {
         self.schedule_mut(stage).add_registered_system(system);
     }

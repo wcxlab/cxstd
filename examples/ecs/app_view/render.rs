@@ -1,7 +1,9 @@
 //! `RenderPlugin::default()` supplies the shared PaintList and registers terminal output.
-//! Load it after view plugins so `render_system` runs after their paint systems.
+//! Load it after view plugins so RenderSystem runs after their paint systems.
 //! The first update adds a task entity owning the counter's asynchronous loop.
-use cxstd::ecs::{Component, Plugin, PluginContext, Res, Resource, SystemContext, TaskEntity};
+use cxstd::ecs::{
+    Component, Plugin, PluginContext, Res, Resource, System, SystemContext, TaskEntity,
+};
 
 use crate::app_core::Status;
 
@@ -9,13 +11,13 @@ use crate::app_core::Status;
 pub(super) struct RenderPlugin;
 
 impl Plugin for RenderPlugin {
-    type LoadParams = ();
+    type Deps = ();
 
     fn load(&mut self, ctx: PluginContext, _deps: ()) -> anyhow::Result<()> {
         ctx.add_resource(PaintList::default());
-        ctx.add_system("update", update_counter_system);
+        ctx.add_system("update", UpdateCounterSystem);
         ctx.add_apply_deferred("update");
-        ctx.add_system("render", render_system);
+        ctx.add_system("render", RenderSystem);
         Ok(())
     }
 
@@ -39,25 +41,39 @@ impl Resource for PaintList {}
 struct CounterLoop;
 impl Component for CounterLoop {}
 
-fn update_counter_system(ctx: SystemContext, deps: Res<Status>) {
-    let status = deps;
-    if ctx.world().query::<CounterLoop>().next().is_none() {
-        let status = status.clone();
-        let mut task = TaskEntity::new(async move {
-            loop {
-                status.increment_counter().await;
-            }
-        });
-        task.add_component(CounterLoop);
-        ctx.add_entity(task);
+struct UpdateCounterSystem;
+
+impl System for UpdateCounterSystem {
+    type Deps = Res<'static, Status>;
+
+    fn run(&mut self, ctx: SystemContext, deps: Res<Status>) -> anyhow::Result<()> {
+        let status = deps;
+        if ctx.world().query::<CounterLoop>().next().is_none() {
+            let status = status.clone();
+            let mut task = TaskEntity::new(async move {
+                loop {
+                    status.increment_counter().await;
+                }
+            });
+            task.add_component(CounterLoop);
+            ctx.add_entity(task);
+        }
+        Ok(())
     }
 }
 
-fn render_system(_: cxstd::ecs::SystemContext, deps: Res<PaintList>) {
-    let list = deps;
-    println!("View tree:");
-    for line in &list.0 {
-        println!("{line}");
+struct RenderSystem;
+
+impl System for RenderSystem {
+    type Deps = Res<'static, PaintList>;
+
+    fn run(&mut self, _ctx: SystemContext, deps: Res<PaintList>) -> anyhow::Result<()> {
+        let list = deps;
+        println!("View tree:");
+        for line in &list.0 {
+            println!("{line}");
+        }
+        Ok(())
     }
 }
 

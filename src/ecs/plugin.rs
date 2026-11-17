@@ -3,24 +3,32 @@
 //! Load dependencies use the same extraction as systems. Setup registrations are deferred.
 //!
 //! ```
-//! use cxstd::ecs::{PluginContext, Ecs, Plugin, Res, ResMut, Resource};
+//! use cxstd::ecs::{PluginContext, Ecs, Plugin, Res, ResMut, Resource, System, SystemContext};
 //!
 //! struct Initial(u32);
 //! impl Resource for Initial {}
 //! struct Count(u32);
 //! impl Resource for Count {}
 //! struct CounterPlugin;
+//! struct CounterSystem;
+//!
+//! impl System for CounterSystem {
+//!     type Deps = ResMut<'static, Count>;
+//!
+//!     fn run(&mut self, _ctx: SystemContext, deps: ResMut<Count>) -> anyhow::Result<()> {
+//!         let mut count = deps;
+//!         count.0 += 1;
+//!         Ok(())
+//!     }
+//! }
 //!
 //! impl Plugin for CounterPlugin {
-//!     type LoadParams = Res<'static, Initial>;
+//!     type Deps = Res<'static, Initial>;
 //!
 //!     fn load(&mut self, ctx: PluginContext, deps: Res<Initial>) -> anyhow::Result<()> {
 //!         let initial = deps;
 //!         ctx.add_resource(Count(initial.0));
-//!         ctx.add_system("update", |_: cxstd::ecs::SystemContext<'_, _>, deps: ResMut<Count>| {
-//!             let mut count = deps;
-//!             count.0 += 1;
-//!         });
+//!         ctx.add_system("update", CounterSystem);
 //!         Ok(())
 //!     }
 //! }
@@ -43,16 +51,21 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use super::{Ecs, PluginContext, SystemParam};
+use super::{Dependences, Ecs, PluginContext};
 
 /// Groups ECS setup and optional cleanup behind an ECS-owned instance.
 pub trait Plugin<C: 'static = ()>: 'static {
-    type LoadParams: SystemParam<C>;
+    type Deps: Dependences<C>;
+
+    /// Defaults to the Rust type name, including its module path.
+    fn name(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
 
     fn load(
         &mut self,
         ctx: PluginContext<'_, C>,
-        deps: <Self::LoadParams as SystemParam<C>>::Item<'_>,
+        deps: <Self::Deps as Dependences<C>>::Item<'_>,
     ) -> anyhow::Result<()>;
 
     /// Release plugin-owned handles. The default does nothing; ECS entities,

@@ -2,11 +2,11 @@
 
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
-use super::{Ecs, Resources, System};
+use super::{Ecs, Resources, system::SystemRunner};
 
 pub(crate) enum Registration<C> {
     Resource(Box<dyn FnOnce(&Resources) -> anyhow::Result<()>>),
-    System(String, Box<dyn System<C>>),
+    System(String, SystemRunner<C>),
     Schedule(String),
     ApplyDeferred(String),
 }

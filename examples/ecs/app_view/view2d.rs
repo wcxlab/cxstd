@@ -1,7 +1,9 @@
 //! Call `ecs.add_plugin(View2dPlugin::default())` to register
 //! page entities and tree and paint systems.
 //! The host supplies a Core Status snapshot before running the update schedule.
-use cxstd::ecs::{Component, Entity, Plugin, PluginContext, Query, Res, ResMut};
+use cxstd::ecs::{
+    Component, Entity, Plugin, PluginContext, Query, Res, ResMut, System, SystemContext,
+};
 
 use super::render::PaintList;
 use crate::app_core::Status;
@@ -10,7 +12,7 @@ use crate::app_core::Status;
 pub(super) struct View2dPlugin;
 
 impl Plugin for View2dPlugin {
-    type LoadParams = ();
+    type Deps = ();
 
     fn load(&mut self, ctx: PluginContext, _deps: ()) -> anyhow::Result<()> {
         let mut view_entity1 = Entity::new();
@@ -21,8 +23,59 @@ impl Plugin for View2dPlugin {
         view_entity2.add_component(ElementTree::new("page 2"));
         ctx.add_entity(view_entity2);
 
-        ctx.add_system("update", build_view2d_system);
-        ctx.add_system("render", paint_view2d_system);
+        ctx.add_system("update", BuildView2dSystem);
+        ctx.add_system("render", PaintView2dSystem);
+        Ok(())
+    }
+}
+
+pub(super) struct BuildView2dSystem;
+
+impl System for BuildView2dSystem {
+    type Deps = (
+        Query<'static, &'static mut ElementTree>,
+        Res<'static, Status>,
+    );
+
+    fn run(
+        &mut self,
+        _ctx: SystemContext,
+        deps: (Query<&mut ElementTree>, Res<Status>),
+    ) -> anyhow::Result<()> {
+        let (mut trees, status) = deps;
+        let counter = status.counter();
+        for mut tree in trees.iter_mut() {
+            tree.builds += 1;
+            tree.root = Some(Element {
+                text: tree.name.clone(),
+                children: vec![build_label(tree.builds), build_status(&status, counter)],
+            });
+            println!("build_view2d_system: {}, build {}", tree.name, tree.builds);
+        }
+        Ok(())
+    }
+}
+
+pub(super) struct PaintView2dSystem;
+
+impl System for PaintView2dSystem {
+    type Deps = (
+        Query<'static, &'static ElementTree>,
+        ResMut<'static, PaintList>,
+    );
+
+    fn run(
+        &mut self,
+        _ctx: SystemContext,
+        deps: (Query<&ElementTree>, ResMut<PaintList>),
+    ) -> anyhow::Result<()> {
+        let (trees, mut list) = deps;
+        for tree in trees.iter() {
+            list.0.clear();
+            if let Some(root) = &tree.root {
+                root.paint(&mut list.0, 0);
+            }
+        }
         Ok(())
     }
 }
@@ -58,34 +111,6 @@ impl ElementTree {
     }
 }
 
-pub(super) fn build_view2d_system(
-    _: cxstd::ecs::SystemContext,
-    deps: (Query<&mut ElementTree>, Res<Status>),
-) {
-    let (mut trees, status) = deps;
-    let counter = status.counter();
-    for mut tree in trees.iter_mut() {
-        tree.builds += 1;
-        tree.root = Some(Element {
-            text: tree.name.clone(),
-            children: vec![build_label(tree.builds), build_status(&status, counter)],
-        });
-        println!("build_view2d_system: {}, build {}", tree.name, tree.builds);
-    }
-}
-
-pub(super) fn paint_view2d_system(
-    _: cxstd::ecs::SystemContext,
-    deps: (Query<&ElementTree>, ResMut<PaintList>),
-) {
-    let (trees, mut list) = deps;
-    for tree in trees.iter() {
-        list.0.clear();
-        if let Some(root) = &tree.root {
-            root.paint(&mut list.0, 0);
-        }
-    }
-}
 
 fn build_label(build: usize) -> Element {
     Element {

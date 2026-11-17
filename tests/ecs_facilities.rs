@@ -34,23 +34,25 @@ fn commands_wait_for_barriers_and_keep_new_work_for_the_next_batch() -> anyhow::
     let calls = observed.clone();
     ecs.add_system(
         "update",
-        move |_: cxstd::ecs::SystemContext<'_, _>, deps: CommandQueue| {
-            let commands = deps;
-            calls.set(calls.get() + 1);
-            commands.queue_with(move |world, _, access| {
-                *world.state_mut(value)? += 1;
-                access.resources().get_mut::<Trace>()?.0.push("command");
-                access.command_queue().queue_with(|_, _, access| {
-                    access
-                        .resources()
-                        .get_mut::<Trace>()?
-                        .0
-                        .push("next barrier");
+        support::system(
+            move |_: cxstd::ecs::SystemContext<'_, _>, deps: CommandQueue| {
+                let commands = deps;
+                calls.set(calls.get() + 1);
+                commands.queue_with(move |world, _, access| {
+                    *world.state_mut(value)? += 1;
+                    access.resources().get_mut::<Trace>()?.0.push("command");
+                    access.command_queue().queue_with(|_, _, access| {
+                        access
+                            .resources()
+                            .get_mut::<Trace>()?
+                            .0
+                            .push("next barrier");
+                        Ok(())
+                    });
                     Ok(())
                 });
-                Ok(())
-            });
-        },
+            },
+        ),
     );
     ecs.run()?;
     assert!(ecs.resource::<Trace>()?.0.is_empty());
@@ -85,7 +87,9 @@ fn failed_commands_preserve_old_work_before_new_and_stop_systems() -> anyhow::Re
     });
     ecs.add_apply_deferred("update").add_system(
         "update",
-        |_: cxstd::ecs::SystemContext<'_, _>, _deps: ()| -> () { panic!("later system ran") },
+        support::system(|_: cxstd::ecs::SystemContext<'_, _>, _deps: ()| -> () {
+            panic!("later system ran")
+        }),
     );
     assert!(ecs.run().is_err());
     assert_eq!(ecs.apply_commands(&mut ())?, 2);

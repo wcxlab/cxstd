@@ -1,7 +1,7 @@
 mod support;
 
 use cxstd::ecs::{
-    Component, Entity, Plugin, PluginContext, Query, Res, ResMut, Resource, SystemContext,
+    Component, Entity, Plugin, PluginContext, Query, Res, ResMut, Resource, System, SystemContext,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -21,7 +21,7 @@ impl Resource for Ready {}
 struct Configure;
 
 impl Plugin for Configure {
-    type LoadParams = (Res<'static, Settings>,);
+    type Deps = (Res<'static, Settings>,);
 
     fn load(&mut self, ctx: PluginContext, deps: (Res<Settings>,)) -> anyhow::Result<()> {
         let (settings,) = deps;
@@ -32,31 +32,42 @@ impl Plugin for Configure {
         entity.add_component(Position(2));
         let entity = ctx.add_entity(entity);
         assert!(!ctx.world().contains(entity));
-        ctx.add_system("update", update);
+        ctx.add_system("update", Update);
         Ok(())
     }
 }
 
-fn update(
-    ctx: SystemContext,
-    deps: (
-        Res<Settings>,
-        ResMut<Trace>,
-        Query<(cxstd::ecs::EntityId, &mut Position)>,
-    ),
-) -> anyhow::Result<()> {
-    let (settings, mut trace, mut positions) = deps;
-    assert!(ctx.resource_mut::<Trace>().is_err());
-    for (entity, mut position) in positions.iter_mut() {
-        assert!(ctx.world().component::<Position>(entity).is_err());
-        position.0 += settings.0;
+struct Update;
+
+impl System for Update {
+    type Deps = (
+        Res<'static, Settings>,
+        ResMut<'static, Trace>,
+        Query<'static, (cxstd::ecs::EntityId, &'static mut Position)>,
+    );
+
+    fn run(
+        &mut self,
+        ctx: SystemContext,
+        deps: (
+            Res<Settings>,
+            ResMut<Trace>,
+            Query<(cxstd::ecs::EntityId, &mut Position)>,
+        ),
+    ) -> anyhow::Result<()> {
+        let (settings, mut trace, mut positions) = deps;
+        assert!(ctx.resource_mut::<Trace>().is_err());
+        for (entity, mut position) in positions.iter_mut() {
+            assert!(ctx.world().component::<Position>(entity).is_err());
+            position.0 += settings.0;
+        }
+        trace.0.push(settings.0);
+        if trace.0.len() == 1 {
+            ctx.add_resource(Ready)?;
+            assert!(ctx.resource::<Ready>().is_err());
+        }
+        Ok(())
     }
-    trace.0.push(settings.0);
-    if trace.0.len() == 1 {
-        ctx.add_resource(Ready)?;
-        assert!(ctx.resource::<Ready>().is_err());
-    }
-    Ok(())
 }
 
 #[test]
@@ -77,7 +88,7 @@ fn plugins_and_systems_share_context_without_exposing_ecs() -> anyhow::Result<()
 
 struct NeedsSettings(Rc<Cell<bool>>);
 impl Plugin for NeedsSettings {
-    type LoadParams = Res<'static, Settings>;
+    type Deps = Res<'static, Settings>;
 
     fn load(&mut self, _: PluginContext, deps: Res<Settings>) -> anyhow::Result<()> {
         let _ = deps;
@@ -97,7 +108,7 @@ fn missing_dependencies_fail_before_plugin_load_runs() -> anyhow::Result<()> {
 
 struct Conflicting(Rc<Cell<bool>>);
 impl Plugin for Conflicting {
-    type LoadParams = (Res<'static, Settings>, ResMut<'static, Settings>);
+    type Deps = (Res<'static, Settings>, ResMut<'static, Settings>);
 
     fn load(
         &mut self,
@@ -130,7 +141,7 @@ impl Drop for Dropped {
 }
 struct Failing(Rc<Cell<bool>>);
 impl Plugin for Failing {
-    type LoadParams = ResMut<'static, Settings>;
+    type Deps = ResMut<'static, Settings>;
 
     fn load(&mut self, ctx: PluginContext, deps: ResMut<Settings>) -> anyhow::Result<()> {
         let mut settings = deps;
@@ -138,7 +149,7 @@ impl Plugin for Failing {
         ctx.add_resource(Dropped(self.0.clone()));
         ctx.add_system(
             "unused",
-            |_: cxstd::ecs::SystemContext<'_, _>, _deps: ()| {},
+            support::system(|_: cxstd::ecs::SystemContext<'_, _>, _deps: ()| {}),
         );
         anyhow::bail!("expected load failure")
     }
@@ -176,7 +187,7 @@ fn context_registrations_remain_local_to_their_ecs() -> anyhow::Result<()> {
 struct Host(u32);
 struct Hosted;
 impl Plugin<Host> for Hosted {
-    type LoadParams = ();
+    type Deps = ();
 
     fn load(&mut self, ctx: PluginContext<Host>, _deps: ()) -> anyhow::Result<()> {
         ctx.queue_with(|_, host, _| {
@@ -211,7 +222,7 @@ fn plugin_lifecycle_supports_an_application_host() -> anyhow::Result<()> {
 
 struct Inspected;
 impl Plugin for Inspected {
-    type LoadParams = (Res<'static, Settings>, Query<'static, &'static Position>);
+    type Deps = (Res<'static, Settings>, Query<'static, &'static Position>);
 
     fn load(
         &mut self,
@@ -246,7 +257,7 @@ struct Managed {
 }
 
 impl Plugin for Managed {
-    type LoadParams = ();
+    type Deps = ();
 
     fn load(&mut self, _: PluginContext, _deps: ()) -> anyhow::Result<()> {
         self.log.borrow_mut().push(("load", self.value));
