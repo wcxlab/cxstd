@@ -1,0 +1,38 @@
+[package]
+name = "cxstd"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.100"
+description = "Shared ECS, task, and window interfaces."
+license = "Apache-2.0"
+repository = "https://github.com/wcxlab/cxstd"
+
+[dependencies]
+anyhow = "1"
+derive_more = { version = "2.1.1", features = ["add", "add_assign", "mul", "mul_assign", "not"] }
+futures = "0.3.32"
+elsa = "1.11.2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
+lyon = "1.0"
+raw-window-handle = "0.6"
+pollster = "1"
+schemars = "1.0"
+sdl3-sys = { version = "0.7.2", default-features = false, features = ["build-from-source-static"] }
+serde = { version = "1", features = ["derive"] }
+taffy = "=0.13.0"
+thiserror = "2"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+url = "2.5"
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "dx12", "metal", "vulkan"] }
+
+[target.'cfg(not(windows))'.dependencies]
+arboard = { version = "3.6.1", features = ["wayland-data-control"] }
+
+[target.'cfg(windows)'.dependencies]
+clipboard-win = { version = "5.4.1", features = ["std"] }
+seahash = "4"
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+
+[workspace]
+resolver = "3"
